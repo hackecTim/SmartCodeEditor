@@ -3,7 +3,6 @@ set -e
 echo "=== SmartCode LSP Bridge ==="
 mkdir -p /workspace /workspace/java-data
 
-# Generate compile_commands.json for clangd
 if [ -f /workspace/CMakeLists.txt ]; then
   echo "Running cmake..."
   cmake -S /workspace -B /workspace/build \

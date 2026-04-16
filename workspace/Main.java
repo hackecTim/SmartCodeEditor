@@ -8,6 +8,6 @@ public class Main {
         System.out.println(text.length());
         System.out.println(add(2, 3));
         System.out.println();
-        
+        System.out
     }
 }

@@ -8,14 +8,12 @@ const WORKSPACE = "/workspace";
 mkdirSync(WORKSPACE,                    { recursive: true });
 mkdirSync(join(WORKSPACE, "java-data"), { recursive: true });
 
-// ═══════════════════════════════════════════════════════════════════════
-// LSP process factory
-// ═══════════════════════════════════════════════════════════════════════
+
 function createLspProcess(name, getArgs, clients) {
   let proc        = null;
   let procReady   = false;
-  let initialized = false;   // clangd/jdtls "initialize" already handled
-  let initResult  = null;    // cached initialize response to replay for new connections
+  let initialized = false;   
+  let initResult  = null;    
   let buf         = "";
   const SEP       = "\r\n\r\n";
 
@@ -37,32 +35,25 @@ function createLspProcess(name, getArgs, clients) {
     }
   }
 
-  // Called for every message from browser WebSocket
   function handleClientMessage(ws, msg) {
     const method = msg.method;
     const id     = msg.id;
 
-    // ── "initialize" — only the first call goes to the LSP process ────
-    // Subsequent calls (from page reload) get a fake success response
     if (method === "initialize") {
       if (initialized && initResult !== null) {
-        // Replay cached result to new client
         ws.send(JSON.stringify({ jsonrpc: "2.0", id, result: initResult }));
         console.log(`[${name}] replayed initialize to reconnected client`);
       } else {
-        // First time — forward to LSP and remember result
         sendRaw(msg);
       }
       return;
     }
 
-    // ── "initialized" notification — skip if already done ─────────────
     if (method === "initialized") {
       if (!initialized) sendRaw(msg);
       return;
     }
 
-    // Everything else goes straight through
     sendRaw(msg);
   }
 
@@ -107,9 +98,7 @@ function createLspProcess(name, getArgs, clients) {
         try {
           const parsed = JSON.parse(body);
 
-          // Cache the initialize result so we can replay it
           if (parsed.id !== undefined && !initialized) {
-            // This is the response to our first initialize request
             initialized = true;
             initResult  = parsed.result;
             console.log(`[${name}] initialized successfully`);
@@ -140,7 +129,7 @@ function createLspProcess(name, getArgs, clients) {
   return { handleClientMessage, start, isReady: () => procReady };
 }
 
-// ── clangd ────────────────────────────────────────────────────────────
+//clangd
 const clangdClients = new Set();
 const clangd = createLspProcess("clangd", () => {
   const compileDb = join(WORKSPACE, "build", "compile_commands.json");
@@ -159,7 +148,7 @@ const clangd = createLspProcess("clangd", () => {
   return { cmd: "clangd", args, opts: { cwd: WORKSPACE } };
 }, clangdClients);
 
-// ── jdtls ─────────────────────────────────────────────────────────────
+//jdtls
 const javaClients = new Set();
 const jdtls = createLspProcess("jdtls", () => {
   const pluginsDir = "/opt/jdtls/plugins";
@@ -197,9 +186,8 @@ const jdtls = createLspProcess("jdtls", () => {
   };
 }, javaClients);
 
-// ═══════════════════════════════════════════════════════════════════════
-// HTTP — file save / load
-// ═══════════════════════════════════════════════════════════════════════
+
+// HTTP—file save/load
 const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -248,11 +236,11 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end("Not found");
 });
 
-// ═══════════════════════════════════════════════════════════════════════
+
 // WebSocket routing
-//   ws://localhost:3000/       → clangd
-//   ws://localhost:3000/java   → jdtls
-// ═══════════════════════════════════════════════════════════════════════
+// ws://localhost:3000/ → clangd
+// ws://localhost:3000/java  → jdtls
+
 const wssClangd = new WebSocketServer({ noServer: true });
 const wssJava   = new WebSocketServer({ noServer: true });
 
@@ -293,7 +281,6 @@ function setupWss(wss, lspProc, clientSet, name) {
 setupWss(wssClangd, clangd, clangdClients, "clangd");
 setupWss(wssJava,   jdtls,  javaClients,   "jdtls");
 
-// ── Start ─────────────────────────────────────────────────────────────
 clangd.start();
 jdtls.start();
 server.listen(3000, () => console.log("SmartCode server on http://localhost:3000"));

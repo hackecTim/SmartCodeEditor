@@ -1,10 +1,9 @@
 // editorMain.js — zahteva config.js (mora biti naložen prej v HTML)
-
 let editor;
 let diagnosticMarks      = [];
 let autosaveTimer        = null;
 let completionTimer      = null;
-let isProgrammaticChange = false;
+let isLanguageChange = false;
 let clangdInitialized    = false;
 let javaInitialized      = false;
 
@@ -84,14 +83,14 @@ int main() {
 }`
 };
 
-// ── docState ──────────────────────────────────────────────────────────
+
 const docState = {
   uri:        `${CFG.workspace.rootUri}/main.cpp`,
   languageId: "cpp",
   version:    1
 };
 
-// ── Helpers ───────────────────────────────────────────────────────────
+
 function getFilename(mode)  { return CFG.workspace.files[mode] || "main.cpp"; }
 function getCurrentMode()   { return editor?.getOption("mode") ?? SAVED_MODE; }
 function getUri(mode)       { return `${CFG.workspace.rootUri}/${getFilename(mode)}`; }
@@ -104,12 +103,12 @@ function updateDocState(mode) {
 }
 
 function setValueSafe(val) {
-  isProgrammaticChange = true;
+  isLanguageChange = true;
   editor.setValue(val);
-  isProgrammaticChange = false;
+  isLanguageChange = false;
 }
 
-// ── LSP routing ───────────────────────────────────────────────────────
+//LSP routing
 function lspRequest(method, params) {
   if (isJava())   return sendJavaRequest(method, params);
   if (isClangd()) return sendLspRequest(method, params);
@@ -127,7 +126,7 @@ function lspReady() {
   return false;
 }
 
-// ── Snippet cleanup ───────────────────────────────────────────────────
+//Snippet cleanup
 function stripSnippets(text) {
   if (!text) return "";
   return text
@@ -144,7 +143,7 @@ function getInsertText(item) {
   return item.label;
 }
 
-// ── Startup ───────────────────────────────────────────────────────────
+//Startup
 document.addEventListener("DOMContentLoaded", async () => {
   initEditor();
   initUI();
@@ -153,7 +152,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   initJavaLsp();
 });
 
-// ── Editor ────────────────────────────────────────────────────────────
+//Editor
 function initEditor() {
   const ta = document.getElementById("editor");
   if (!ta) return console.error("Missing #editor");
@@ -178,7 +177,7 @@ function initEditor() {
   editor.on("cursorActivity", updateCursorInfo);
 
   editor.on("change", (_cm, _ch) => {
-    if (isProgrammaticChange) return;
+    if (isLanguageChange) return;
     docState.version++;
     setAutosaveInfo("Autosave: pending…", "autosave-pending");
 
@@ -236,7 +235,7 @@ function initEditor() {
   updateCursorInfo();
 }
 
-// ── UI ────────────────────────────────────────────────────────────────
+//UI
 function initUI() {
   const sel = document.getElementById("languageSelect");
   if (sel) sel.value = SAVED_MODE;
@@ -248,7 +247,7 @@ function initUI() {
   document.getElementById("fileInput")?.addEventListener("change", onLocalFileSelected);
 }
 
-// ── LSP clangd ────────────────────────────────────────────────────────
+//LSP clangd
 function initClangdLsp() {
   connectLsp(CFG.server.wsClangd);
 
@@ -275,7 +274,7 @@ function initClangdLsp() {
   onLspDiagnostics(params => { if (isClangd()) renderDiagnostics(params?.diagnostics || []); });
 }
 
-// ── LSP jdtls ─────────────────────────────────────────────────────────
+//LSP jdtls
 function initJavaLsp() {
   connectJavaLsp(CFG.server.wsJava);
 
@@ -360,7 +359,7 @@ function updateServerInfo() {
   }
 }
 
-// ── Completion ────────────────────────────────────────────────────────
+//Completion
 function requestCompletion(triggerChar = null) {
   if (!lspReady()) return;
 
@@ -452,7 +451,7 @@ function requestCompletion(triggerChar = null) {
   .catch(e => console.error("Completion failed:", e));
 }
 
-// ── Save / Load ───────────────────────────────────────────────────────
+//Save/Load 
 async function saveToServer(silent = false) {
   const filename = getFilename(getCurrentMode());
   try {
@@ -548,7 +547,7 @@ async function changeLanguage() {
   await loadFromServer(mode);
 }
 
-// ── Diagnostics ───────────────────────────────────────────────────────
+//Diagnostics
 function renderDiagnostics(diagnostics) {
   clearDiagnostics();
   diagnostics.forEach(diag => {
@@ -563,7 +562,7 @@ function renderDiagnostics(diagnostics) {
 }
 function clearDiagnostics() { diagnosticMarks.forEach(m => m.clear()); diagnosticMarks = []; }
 
-// ── Status bar ────────────────────────────────────────────────────────
+//Status bar 
 function updateCursorInfo() {
   const pos = editor?.getCursor();
   if (!pos) return;

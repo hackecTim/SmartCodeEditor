@@ -1,4 +1,3 @@
-
 function createLspClient() {
   let socket    = null;
   let connected = false;
@@ -6,17 +5,17 @@ function createLspClient() {
   const pending   = new Map();
   const listeners = { open: [], close: [], error: [], diagnostics: [], notification: [] };
 
-  function emit(type, payload) {
-    for (const cb of listeners[type]) {
+function emit(type, payload) {
+   for (const cb of listeners[type]) {
       try { cb(payload); } catch (e) { console.error("LSP listener error:", e); }
-    }
-  }
+   }
+}
 
-  function connect(url) {
-    try {
-      socket = new WebSocket(url);
+function connect(url) {
+  try {
+     socket = new WebSocket(url);
 
-      socket.onopen = () => {
+     socket.onopen = () => {
         connected = true;
         emit("open");
       };
@@ -57,7 +56,7 @@ function createLspClient() {
     }
   }
 
-  function sendRequest(method, params) {
+function sendRequest(method, params) {
     if (!isReady()) return Promise.reject(new Error("LSP not connected"));
     const id = nextId++;
     socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
@@ -105,3 +104,4 @@ function onJavaLspClose(cb)               { javaClient.on("close", cb); }
 function onJavaLspError(cb)               { javaClient.on("error", cb); }
 function onJavaLspDiagnostics(cb)         { javaClient.on("diagnostics", cb); }
 function onJavaLspNotification(cb)        { javaClient.on("notification", cb); }
+  
