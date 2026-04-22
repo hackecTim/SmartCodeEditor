@@ -17,7 +17,7 @@ int main(void) {
 
     printf("%d\n", sum(3, 4));
     printf("%d %d\n", p.x, p.y);
-		
+	  
     return 0;
     
 }
