@@ -1,21 +1,105 @@
 import http from "node:http";
 import { WebSocketServer } from "ws";
 import { spawn } from "node:child_process";
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  statSync
+} from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
-const WORKSPACE = "/workspace";
-mkdirSync(WORKSPACE,                    { recursive: true });
-mkdirSync(join(WORKSPACE, "java-data"), { recursive: true });
+const WORKSPACE     = "/workspace";
+const JAVA_DATA_DIR = join(WORKSPACE, "java-data");
+const SETTINGS_DIR  = join(WORKSPACE, ".settings");
+const WORKSPACE_URI = pathToFileURL(WORKSPACE).href;
 
+mkdirSync(WORKSPACE, { recursive: true });
+mkdirSync(JAVA_DATA_DIR, { recursive: true });
+mkdirSync(SETTINGS_DIR, { recursive: true });
+
+bootstrapJavaProject();
+
+function bootstrapJavaProject() {
+  const projectFile = join(WORKSPACE, ".project");
+  const classpathFile = join(WORKSPACE, ".classpath");
+  const prefsFile = join(SETTINGS_DIR, "org.eclipse.jdt.core.prefs");
+
+  if (!existsSync(projectFile)) {
+    writeFileSync(
+      projectFile,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription>
+  <name>smartcode</name>
+  <comment></comment>
+  <projects></projects>
+  <buildSpec>
+    <buildCommand>
+      <name>org.eclipse.jdt.core.javabuilder</name>
+      <arguments></arguments>
+    </buildCommand>
+  </buildSpec>
+  <natures>
+    <nature>org.eclipse.jdt.core.javanature</nature>
+  </natures>
+</projectDescription>
+`,
+      "utf8"
+    );
+  }
+
+  if (!existsSync(classpathFile)) {
+    writeFileSync(
+      classpathFile,
+      `<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+  <classpathentry kind="src" path=""/>
+  <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+  <classpathentry kind="output" path="bin"/>
+</classpath>
+`,
+      "utf8"
+    );
+  }
+
+  if (!existsSync(prefsFile)) {
+    writeFileSync(
+      prefsFile,
+      `eclipse.preferences.version=1
+org.eclipse.jdt.core.compiler.codegen.targetPlatform=17
+org.eclipse.jdt.core.compiler.compliance=17
+org.eclipse.jdt.core.compiler.source=17
+`,
+      "utf8"
+    );
+  }
+
+  mkdirSync(join(WORKSPACE, "bin"), { recursive: true });
+}
+
+function scanWorkspaceFiles() {
+  return readdirSync(WORKSPACE)
+    .filter(name => {
+      const fp = join(WORKSPACE, name);
+      try {
+        return statSync(fp).isFile();
+      } catch {
+        return false;
+      }
+    })
+    .filter(name => !name.startsWith("."))
+    .sort();
+}
 
 function createLspProcess(name, getArgs, clients) {
   let proc        = null;
   let procReady   = false;
-  let initialized = false;   
-  let initResult  = null;    
-  let buf         = "";
-  const SEP       = "\r\n\r\n";
+  let initialized = false;
+  let initResult  = null;
+  let buf         = Buffer.alloc(0);
 
   function broadcast(msg) {
     const data = JSON.stringify(msg);
@@ -26,12 +110,19 @@ function createLspProcess(name, getArgs, clients) {
 
   function sendRaw(obj) {
     if (!proc || !procReady) return;
+
     try {
-      const json    = JSON.stringify(obj);
-      const payload = `Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n${json}`;
-      proc.stdin.write(payload);
+      const json = JSON.stringify(obj);
+      const body = Buffer.from(json, "utf8");
+      const header = Buffer.from(
+        `Content-Length: ${body.length}\r\n\r\n`,
+        "ascii"
+      );
+      proc.stdin.write(Buffer.concat([header, body]));
     } catch (e) {
-      if (e.code !== "EPIPE") console.error(`[${name}] send error:`, e.message);
+      if (e.code !== "EPIPE") {
+        console.error(`[${name}] send error:`, e.message);
+      }
     }
   }
 
@@ -62,43 +153,58 @@ function createLspProcess(name, getArgs, clients) {
     try {
       spawnArgs = getArgs();
     } catch (e) {
-      console.error(`[${name}] cannot get args:`, e.message, "— retrying in 5s");
+      console.error(`[${name}] cannot get args: ${e.message} — retrying in 5s`);
       setTimeout(start, 5000);
       return;
     }
 
     const { cmd, args, opts } = spawnArgs;
+
     try {
       proc      = spawn(cmd, args, opts);
       procReady = true;
-      buf       = "";
+      buf       = Buffer.alloc(0);
     } catch (e) {
-      console.error(`[${name}] spawn failed:`, e.message, "— retrying in 5s");
+      console.error(`[${name}] spawn failed: ${e.message} — retrying in 5s`);
       setTimeout(start, 5000);
       return;
     }
 
     console.log(`[${name}] started (pid ${proc.pid})`);
 
-    proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", chunk => {
-      buf += chunk;
-      while (true) {
-        const hEnd = buf.indexOf(SEP);
-        if (hEnd === -1) break;
-        const header = buf.slice(0, hEnd);
-        const m      = header.match(/Content-Length: (\d+)/i);
-        if (!m) { buf = buf.slice(hEnd + 4); break; }
-        const len    = Number(m[1]);
-        const bStart = hEnd + 4;
-        const bEnd   = bStart + len;
-        if (buf.length < bEnd) break;
-        const body = buf.slice(bStart, bEnd);
-        buf = buf.slice(bEnd);
-        try {
-          const parsed = JSON.parse(body);
+      buf = Buffer.concat([buf, chunk]);
 
-          if (parsed.id !== undefined && !initialized) {
+      while (true) {
+        const sep = buf.indexOf("\r\n\r\n");
+        if (sep === -1) break;
+
+        const headerBuf = buf.slice(0, sep);
+        const headerStr = headerBuf.toString("ascii");
+        const match = headerStr.match(/Content-Length:\s*(\d+)/i);
+
+        if (!match) {
+          buf = buf.slice(sep + 4);
+          continue;
+        }
+
+        const len = Number(match[1]);
+        const bodyStart = sep + 4;
+        const bodyEnd   = bodyStart + len;
+
+        if (buf.length < bodyEnd) break;
+
+        const bodyBuf = buf.slice(bodyStart, bodyEnd);
+        buf = buf.slice(bodyEnd);
+
+        try {
+          const parsed = JSON.parse(bodyBuf.toString("utf8"));
+
+          if (
+            parsed.id !== undefined &&
+            !initialized &&
+            parsed.result !== undefined
+          ) {
             initialized = true;
             initResult  = parsed.result;
             console.log(`[${name}] initialized successfully`);
@@ -111,7 +217,9 @@ function createLspProcess(name, getArgs, clients) {
       }
     });
 
-    proc.stderr.on("data", c => process.stderr.write(`[${name}] ${c}`));
+    proc.stderr.on("data", c => {
+      process.stderr.write(`[${name}] ${c}`);
+    });
 
     proc.on("exit", (code, signal) => {
       procReady   = false;
@@ -126,7 +234,11 @@ function createLspProcess(name, getArgs, clients) {
     });
   }
 
-  return { handleClientMessage, start, isReady: () => procReady };
+  return {
+    handleClientMessage,
+    start,
+    isReady: () => procReady
+  };
 }
 
 //clangd
@@ -141,11 +253,17 @@ const clangd = createLspProcess("clangd", () => {
     "--header-insertion=never",
     "--ranking-model=decision_forest"
   ];
+
   if (existsSync(compileDb)) {
     args.push(`--compile-commands-dir=${join(WORKSPACE, "build")}`);
     console.log("[clangd] using compile_commands.json");
   }
-  return { cmd: "clangd", args, opts: { cwd: WORKSPACE } };
+
+  return {
+    cmd: "clangd",
+    args,
+    opts: { cwd: WORKSPACE }
+  };
 }, clangdClients);
 
 //jdtls
@@ -172,33 +290,43 @@ const jdtls = createLspProcess("jdtls", () => {
       "-Declipse.application=org.eclipse.jdt.ls.core.id1",
       "-Dosgi.bundles.defaultStartLevel=4",
       "-Declipse.product=org.eclipse.jdt.ls.core.product",
-      "-Dlog.level=ERROR",
-      "-noverify",
+      "-Dlog.level=ALL",
+      "-Dfile.encoding=UTF-8",
+      "-Xms256m",
       "-Xmx1G",
       "--add-modules=ALL-SYSTEM",
       "--add-opens", "java.base/java.util=ALL-UNNAMED",
       "--add-opens", "java.base/java.lang=ALL-UNNAMED",
       "-jar", join(pluginsDir, launcher),
       "-configuration", "/opt/jdtls/config_linux",
-      "-data", join(WORKSPACE, "java-data")
+      "-data", JAVA_DATA_DIR
     ],
     opts: { cwd: WORKSPACE }
   };
 }, javaClients);
 
-
-// HTTP—file save/load
+//HTTP
 const server = http.createServer((req, res) => {
   res.setHeader("Access-Control-Allow-Origin",  "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
 
   const fileMatch = req.url?.match(/^\/workspace\/([^/]+)$/);
 
   if (req.method === "GET" && fileMatch) {
     const fp = join(WORKSPACE, fileMatch[1]);
-    if (!existsSync(fp)) { res.writeHead(404); res.end("Not found"); return; }
+    if (!existsSync(fp)) {
+      res.writeHead(404);
+      res.end("Not found");
+      return;
+    }
+
     res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
     res.end(readFileSync(fp, "utf8"));
     return;
@@ -207,6 +335,8 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && fileMatch) {
     const fp = join(WORKSPACE, fileMatch[1]);
     let body = "";
+
+    req.setEncoding("utf8");
     req.on("data", c => { body += c; });
     req.on("end", () => {
       try {
@@ -214,33 +344,39 @@ const server = http.createServer((req, res) => {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: true }));
       } catch (e) {
-        res.writeHead(500);
+        res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: e.message }));
       }
     });
     return;
   }
 
-  if (req.url === "/health") {
-    res.writeHead(200);
+  if (req.method === "GET" && req.url === "/scan") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ files: scanWorkspaceFiles() }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({
       ok: true,
+      workspace: WORKSPACE,
+      workspaceUri: WORKSPACE_URI,
       clangd: clangd.isReady(),
-      jdtls:  jdtls.isReady(),
+      jdtls: jdtls.isReady(),
       clangdClients: clangdClients.size,
-      javaClients:   javaClients.size
+      javaClients: javaClients.size,
+      files: scanWorkspaceFiles()
     }));
     return;
   }
 
-  res.writeHead(404); res.end("Not found");
+  res.writeHead(404);
+  res.end("Not found");
 });
 
-
-// WebSocket routing
-// ws://localhost:3000/ → clangd
-// ws://localhost:3000/java  → jdtls
-
+//WebSocket routing
 const wssClangd = new WebSocketServer({ noServer: true });
 const wssJava   = new WebSocketServer({ noServer: true });
 
@@ -283,4 +419,9 @@ setupWss(wssJava,   jdtls,  javaClients,   "jdtls");
 
 clangd.start();
 jdtls.start();
-server.listen(3000, () => console.log("SmartCode server on http://localhost:3000"));
+
+server.listen(3000, () => {
+  console.log("SmartCode server on http://localhost:3000");
+  console.log("Workspace:", WORKSPACE);
+  console.log("Workspace URI:", WORKSPACE_URI);
+});
