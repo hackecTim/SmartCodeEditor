@@ -69,7 +69,7 @@ body {
 
 .editor-wrapper {
   width: 88%;
-  height: calc(100vh - 120px);
+  height: calc(100vh - 60px - 36px - 70px);
   margin: 20px auto 10px auto;
   background: white;
   border-radius: 14px;
@@ -138,3 +138,90 @@ body {
   color: white !important;
   border-radius: 4px;
 }
+ .cm-signature-hint {
+  display:         none;
+  position:        fixed;
+  z-index:         200;
+  background:      #1e2030;
+  color:           #c8d3f5;
+  border:          1px solid #3d4166;
+  border-radius:   6px;
+  padding:         5px 12px;
+  font-family:     monospace;
+  font-size:       13px;
+  white-space:     pre;
+  pointer-events:  none;
+  box-shadow:      0 4px 16px rgba(0,0,0,.4);
+  max-width:       600px;
+}
+ 
+.cm-signature-hint strong {
+  color:       #82aaff;
+  font-weight: 700;
+}
+
+/* ── Tab bar ──────────────────────────────────────────────────────── */
+.tab-bar {
+  display:    flex;
+  align-items: stretch;
+  background: #f0f2f5;
+  border-bottom: 1px solid #ddd;
+  overflow-x: auto;
+  flex-shrink: 0;
+  height: 36px;
+}
+
+.tab {
+  display:     flex;
+  align-items: center;
+  gap:         5px;
+  padding:     0 10px 0 12px;
+  font-size:   13px;
+  color:       #555;
+  cursor:      pointer;
+  border-right: 1px solid #ddd;
+  white-space: nowrap;
+  min-width:   80px;
+  transition:  background .1s;
+  user-select: none;
+}
+.tab:hover           { background: #e4e6eb; }
+.tab-active          { background: white; color: #111; border-bottom: 2px solid #2d6cdf; font-weight: 500; }
+.tab-icon            { font-size: 12px; }
+.tab-label           { flex: 1; }
+.tab-close {
+  background:  none;
+  border:      none;
+  color:       #999;
+  cursor:      pointer;
+  font-size:   15px;
+  line-height: 1;
+  padding:     0 2px;
+  border-radius: 3px;
+}
+.tab-close:hover { background: #ccc; color: #333; }
+
+/* ── Editor wrapper — višina glede na tab bar ─────────────────────── */
+.editor-wrapper {
+  width:    88%;
+  height:   calc(100vh - 60px - 36px - 42px);  /* topbar + tabs + statusbar */
+}
+
+/* ── Signature hint ───────────────────────────────────────────────── */
+.cm-signature-hint {
+  display:        none;
+  position:       fixed;
+  z-index:        200;
+  background:     #1e2030;
+  color:          #c8d3f5;
+  border:         1px solid #3d4166;
+  border-radius:  6px;
+  padding:        5px 12px;
+  font-family:    monospace;
+  font-size:      13px;
+  white-space:    pre;
+  pointer-events: none;
+  box-shadow:     0 4px 16px rgba(0,0,0,.4);
+  max-width:      600px;
+}
+.cm-signature-hint strong { color: #82aaff; font-weight: 700; }

@@ -19,35 +19,38 @@
   <script src="codemirror/addon/hint/show-hint.js"></script>
 
   <script src="js/config.js"></script>
-
   <script src="langserver/js/lspClient.js"></script>
-
   <script src="js/editorMain.js"></script>
 </head>
 <body>
+
+  <!--Topbar-->
   <div class="topbar">
     <div class="title">SmartCode</div>
     <div class="controls">
-      <select id="languageSelect">
-        <option value="text/x-java">Java</option>
-        <option value="text/x-csrc">C</option>
-        <option value="text/x-c++src" selected>C++</option>
-      </select>
-      <button id="saveBtn" type="button" class="btn-primary">💾 Save</button>
-      <button id="loadBtn" type="button" class="btn-secondary">📂 Load</button>
-      <button id="openBtn" type="button" class="btn-secondary">🗂 Open Local</button>
-      <input type="file" id="fileInput" style="display:none;" />
+      <button id="newFileBtn"  type="button" class="btn-secondary">＋ New</button>
+      <button id="saveBtn"     type="button" class="btn-primary">💾 Save</button>
+      <button id="openBtn"     type="button" class="btn-secondary">🗂 Open</button>
+      <input type="file" id="fileInput" style="display:none;" multiple />
     </div>
   </div>
 
+  <!--File tabs-->
+  <div class="tab-bar" id="tabBar">
+    <!--tabs injected by JS-->
+  </div>
+
+  <!--Editor-->
   <div class="editor-wrapper">
     <textarea id="editor"></textarea>
   </div>
 
+  <!--Statusbar-->
   <div class="statusbar">
     <div id="cursorInfo">Ln 1, Col 1</div>
     <div id="autosaveInfo" class="autosave-idle">Autosave: —</div>
     <div id="serverInfo">LSP: disconnected</div>
   </div>
+
 </body>
 </html>
