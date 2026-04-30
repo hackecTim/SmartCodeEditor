@@ -290,13 +290,15 @@ const jdtls = createLspProcess("jdtls", () => {
       "-Declipse.application=org.eclipse.jdt.ls.core.id1",
       "-Dosgi.bundles.defaultStartLevel=4",
       "-Declipse.product=org.eclipse.jdt.ls.core.product",
-      "-Dlog.level=ALL",
+      "-Dlog.level=ERROR",          // bilo ALL — zdaj samo napake
       "-Dfile.encoding=UTF-8",
       "-Xms256m",
       "-Xmx1G",
-      "--add-modules=ALL-SYSTEM",
+      "-XX:+UseG1GC",               // G1GC je privzet na Java 21, eksplicitno za jasnost
+      "--add-modules=ALL-SYSTEM",   // na Java 21 ne povzroča več incubator opozoril
       "--add-opens", "java.base/java.util=ALL-UNNAMED",
       "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
       "-jar", join(pluginsDir, launcher),
       "-configuration", "/opt/jdtls/config_linux",
       "-data", JAVA_DATA_DIR
