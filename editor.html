@@ -1,56 +1,39 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="sl">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SmartCode • Code Editor</title>
   <link rel="icon" href="img/smartCodeLogo2.svg" type="image/svg+xml" />
 
-  <link rel="stylesheet" href="codemirror/lib/codemirror.css" />
-  <link rel="stylesheet" href="codemirror/theme/eclipse.css" />
-  <link rel="stylesheet" href="codemirror/theme/abcdef.css" />
-  <link rel="stylesheet" href="codemirror/addon/hint/show-hint.css" />
-  <link rel="stylesheet" href="css/editorStyle.css" />
-
-  <script src="codemirror/lib/codemirror.js"></script>
-  <script src="codemirror/mode/clike/clike.js"></script>
-  <script src="codemirror/addon/edit/matchbrackets.js"></script>
-  <script src="codemirror/addon/edit/closebrackets.js"></script>
-  <script src="codemirror/addon/hint/show-hint.js"></script>
-
-  <script src="js/config.js"></script>
-  <script src="langserver/js/lspClient.js"></script>
-  <script src="js/editorMain.js"></script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/eclipse.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/default.min.css" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css" />
+  <link rel="stylesheet" href="./css/editorStyle.css" />
 </head>
 <body>
 
-  <!--Topbar-->
-  <div class="topbar">
-    <div class="title">SmartCode</div>
-    <div class="controls">
-      <button id="newFileBtn"  type="button" class="btn-secondary">＋ New</button>
-      <button id="saveBtn"     type="button" class="btn-primary">💾 Save</button>
-      <button id="openBtn"     type="button" class="btn-secondary">🗂 Open</button>
-      <input type="file" id="fileInput" style="display:none;" multiple />
-    </div>
-  </div>
+  <div id="editorDiv" style="width:100%; height:100vh;"></div>
 
-  <!--File tabs-->
-  <div class="tab-bar" id="tabBar">
-    <!--tabs injected by JS-->
-  </div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
 
-  <!--Editor-->
-  <div class="editor-wrapper">
-    <textarea id="editor"></textarea>
-  </div>
+  <script src="./js/config.js"></script>
+  <script src="./langserver/js/lspClient.js"></script>
+  <script src="./js/editorMain.js"></script>
+  <script src="./js/smartCodeEditor.js"></script>
 
-  <!--Statusbar-->
-  <div class="statusbar">
-    <div id="cursorInfo">Ln 1, Col 1</div>
-    <div id="autosaveInfo" class="autosave-idle">Autosave: —</div>
-    <div id="serverInfo">LSP: disconnected</div>
-  </div>
+  <script>
+    // 1. parameter: id diva
+    // 2. parameter: toolbar/tabbar/statusbar
+    // 3. parameter: tabbar
+	// 4. parameter: diagnostics
+    var mojEditor = smartCodeEditor.initEditor("editorDiv", true, true, true);
+  </script>
 
 </body>
 </html>
