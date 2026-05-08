@@ -250,7 +250,6 @@ const CFG = Object.freeze({
 
 - **Firefox** is not supported for file open/save (no File System Access API).
 - **C/C++ IntelliSense** works best when a `CMakeLists.txt` is present so clangd can read `compile_commands.json`. Without it, clangd uses fallback flags and may miss includes.
-- **LSP index** is not persisted between page loads — each session starts fresh.
 
 ---
 
