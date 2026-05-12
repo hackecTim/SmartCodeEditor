@@ -14,6 +14,7 @@
 </head>
 <body>
 
+
   <div id="editorDiv" style="width:100%; height:100vh;"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
@@ -24,15 +25,30 @@
 
   <script src="./js/config.js"></script>
   <script src="./langserver/js/lspClient.js"></script>
-  <script src="./js/editorMain.js"></script>
   <script src="./js/smartCodeEditor.js"></script>
+  <script src="./js/editorMain.js"></script>
 
   <script>
-    // 1. parameter: id diva
-    // 2. parameter: toolbar/tabbar/statusbar
-    // 3. parameter: tabbar
-	// 4. parameter: diagnostics
-    var mojEditor = smartCodeEditor.initEditor("editorDiv", true, true, true);
+    // Parametri:
+    // 1. id diva, kamor se editor naloži
+    // 2. toolbar: true/false
+    // 3. tabbar + statusbar: true/false
+    // 4. diagnostika: true/false
+    // 5. način editorja:
+    //    1 = normalno kot zdaj: prazen editor, uporabnik sam odpira projekt/datoteke
+    //    2 = ob zagonu vpraša za direktorij; vse datoteke iz direktorija/podmap odpre v zavihkih in uporabi v LSP
+    //    3 = način za več vgrajenih urejevalnikov na eni strani
+    var mojEditor = smartCodeEditor.initEditor("editorDiv", true, true, true, 1);
+
+    // Primer programskega projekta:
+    // mojEditor.whenReady().then(ed => ed.openProject({
+    //   id: "primer",
+    //   name: "Primer projekt",
+    //   files: [
+    //     { path: "Main.java", content: "public class Main { }" },
+    //     { path: "Helper.java", content: "public class Helper { }" }
+    //   ]
+    // }));
   </script>
 
 </body>
