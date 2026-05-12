@@ -80,18 +80,25 @@ org.eclipse.jdt.core.compiler.source=17
   mkdirSync(join(WORKSPACE, "bin"), { recursive: true });
 }
 
-function scanWorkspaceFiles() {
-  return readdirSync(WORKSPACE)
-    .filter(name => {
-      const fp = join(WORKSPACE, name);
-      try {
-        return statSync(fp).isFile();
-      } catch {
-        return false;
-      }
-    })
-    .filter(name => !name.startsWith("."))
-    .sort();
+// Rekurzivno skenira workspace (ali podmapa folder) in vrne relativne poti od WORKSPACE.
+function scanWorkspaceFiles(folder = "") {
+  const root = folder ? join(WORKSPACE, folder) : WORKSPACE;
+  const results = [];
+  function walk(dir, rel) {
+    let entries;
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const name of entries) {
+      if (name.startsWith(".")) continue;
+      const abs     = join(dir, name);
+      const relPath = rel ? rel + "/" + name : name;
+      let st;
+      try { st = statSync(abs); } catch { continue; }
+      if (st.isDirectory()) walk(abs, relPath);
+      else if (st.isFile()) results.push(relPath);
+    }
+  }
+  walk(root, folder);
+  return results.sort();
 }
 
 function createLspProcess(name, getArgs, clients) {
@@ -319,10 +326,16 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const fileMatch = req.url?.match(/^\/workspace\/([^/]+)$/);
+  // Podpira poti z podmapami: /workspace/sub/dir/file.java
+  const fileMatch = req.url?.match(/^\/workspace\/(.+)$/);
 
   if (req.method === "GET" && fileMatch) {
-    const fp = join(WORKSPACE, fileMatch[1]);
+    const relPath = decodeURIComponent(fileMatch[1]);
+    const fp = join(WORKSPACE, relPath);
+    // Varnostno preverjanje — pot mora ostati znotraj WORKSPACE
+    if (!fp.startsWith(WORKSPACE + "/") && fp !== WORKSPACE) {
+      res.writeHead(403); res.end("Forbidden"); return;
+    }
     if (!existsSync(fp)) {
       res.writeHead(404);
       res.end("Not found");
@@ -335,7 +348,11 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "POST" && fileMatch) {
-    const fp = join(WORKSPACE, fileMatch[1]);
+    const relPath = decodeURIComponent(fileMatch[1]);
+    const fp = join(WORKSPACE, relPath);
+    if (!fp.startsWith(WORKSPACE + "/") && fp !== WORKSPACE) {
+      res.writeHead(403); res.end("Forbidden"); return;
+    }
     let body = "";
 
     req.setEncoding("utf8");
@@ -353,9 +370,13 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (req.method === "GET" && req.url === "/scan") {
+  if (req.method === "GET" && req.url?.startsWith("/scan")) {
+    const scanUrl    = new URL(req.url, "http://localhost");
+    const folder     = scanUrl.searchParams.get("folder") || "";
+    // Varnostno: folder ne sme iti ven iz WORKSPACE
+    const safeFoldr  = folder.replace(/\.\./g, "").replace(/^\//, "");
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ files: scanWorkspaceFiles() }));
+    res.end(JSON.stringify({ files: scanWorkspaceFiles(safeFoldr) }));
     return;
   }
 
