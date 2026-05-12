@@ -541,3 +541,25 @@ body {
     display: none;
   }
 }
+
+.CodeMirror-hints .CodeMirror-hint {
+  cursor: pointer;
+}
+
+.CodeMirror-hints .CodeMirror-hint.CodeMirror-hint-active,
+.CodeMirror-hints .CodeMirror-hint:hover {
+  background: #dbeafe !important;
+  color: #111827 !important;
+}
+
+.CodeMirror-hints .CodeMirror-hint.CodeMirror-hint-active .lsp-hint-label,
+.CodeMirror-hints .CodeMirror-hint:hover .lsp-hint-label,
+.CodeMirror-hints .CodeMirror-hint.CodeMirror-hint-active .lsp-hint-detail,
+.CodeMirror-hints .CodeMirror-hint:hover .lsp-hint-detail {
+  color: #111827 !important;
+}
+
+.CodeMirror-hints .CodeMirror-hint.CodeMirror-hint-active .lsp-hint-kind,
+.CodeMirror-hints .CodeMirror-hint:hover .lsp-hint-kind {
+  font-weight: 700;
+}
