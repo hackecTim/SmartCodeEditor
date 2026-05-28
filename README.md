@@ -5,274 +5,592 @@
 ![C/C++](https://img.shields.io/badge/C%2FC%2B%2B-clangd-blue.svg)
 ![Browser](https://img.shields.io/badge/browser-Chrome%20%2F%20Edge%2086%2B-green.svg)
 
-A browser-based code editor with real-time IntelliSense powered by a self-hosted LSP bridge. Supports Java (via Eclipse JDT Language Server) and C/C++ (via clangd) out of the box.
+SmartCode is a browser-based code editor with real-time IntelliSense powered by a self-hosted LSP bridge. It supports Java through Eclipse JDT Language Server and C/C++ through clangd.
+
+The editor can be used as a full project editor, as a folder-based editor, or as an embedded single-file editor inside another web application.
 
 ---
 
 ## Features
 
 - **Syntax highlighting** for Java, C, and C++
-- **Real-time IntelliSense** — autocomplete, diagnostics, hover
-- **Inline error/warning markers** with gutter icons 
-- **Three usage modes** covering multi-file projects, folder workspaces, and embedded single-file editors
-- **Zero install for the user** — runs entirely in the browser; only the LSP bridge server needs Docker
+- **Real-time IntelliSense**: autocomplete, diagnostics, hover and signature help
+- **Inline error and warning markers** with gutter icons
+- **Cross-file Java support** when all project files are opened or scanned into the LSP workspace
+- **Three usage modes**: project, folder and embedded single editor
+- **Configurable workspace synchronisation** between `/workspace` and `/algator-root`
+- **Optional lsyncd support** for background file watching and synchronisation
+- **Browser-only client**: users do not need local language servers installed
 
 ---
 
 ## Architecture
 
-```
-Browser (editor.html)
-  ├── CodeMirror 5          — editing surface, syntax highlighting
-  ├── editorMain.js         — file management, tabs, autosave, diagnostics rendering
-  ├── lspClient.js          — WebSocket ↔ LSP JSON-RPC bridge (client side)
-  └── smartCodeEditor.js    — public API  (initEditor / EditorAPI)
+```text
+Browser
+  ├── editor.html
+  ├── CodeMirror 5
+  ├── js/config.js
+  ├── js/editorMain.js
+  ├── js/smartCodeEditor.js
+  └── langserver/js/lspClient.js
 
-LSP Bridge (Docker)
-  ├── server.js             — HTTP + WebSocket server
-  ├── clangd               — C/C++ language server
-  └── jdtls (Eclipse JDT)  — Java language server
+Docker LSP Bridge
+  ├── langserver/js/server.js
+  ├── clangd
+  ├── Eclipse JDT Language Server
+  ├── lsyncd / rsync
+  ├── /workspace
+  └── /algator-root
 ```
 
-The browser connects to the LSP bridge over WebSocket. The bridge forwards JSON-RPC messages between the editor and the language servers running inside the container.
+The browser communicates with the Docker bridge through WebSocket connections. The bridge forwards LSP JSON-RPC messages to `clangd` or `jdtls`.
+
+Source files are staged in `/workspace`, which is the main LSP working directory. When synchronisation is enabled, changes can be copied from `/workspace` to `/algator-root`.
 
 ---
 
 ## Quick Start
 
-### 1. Start the LSP bridge
+### 1. Build the Docker image
+
+From the project root:
 
 ```bash
-# Iz korena projekta:
 docker build -f langserver/docker/Dockerfile -t smartcode-lsp langserver/
-docker run -d \
+```
+
+### 2. Start the LSP bridge
+
+Linux/macOS example:
+
+```bash
+docker run --rm -it \
   -p 3000:3000 \
-  -v /your/workspace:/workspace \
-  --name smartcode-lsp \
+  -e ENABLE_LSYNC=true \
+  -e SYNC_ROOT=main \
+  -v "$PWD/workspace:/workspace" \
+  -v "$PWD/algator-root:/algator-root" \
   smartcode-lsp
 ```
 
-### 2. Open the editor
+Windows PowerShell example:
 
-Open `editor.html` directly in a browser (or serve it with any static file server). No build step is needed.
-
-```bash
-# Simple static server example
-npx serve .
-# then open http://localhost:3000
+```powershell
+docker run --rm -it `
+  -p 3000:3000 `
+  -e ENABLE_LSYNC=true `
+  -e SYNC_ROOT=main `
+  -v "C:\xampp\htdocs\smartCodev3\workspace:/workspace" `
+  -v "C:\xampp\htdocs\smartCodev3\algator-root:/algator-root" `
+  smartcode-lsp
 ```
 
-> **Note:** The File System Access API used for open/save requires a browser that supports it (Chrome / Edge 86+). Firefox is not currently supported for file operations.
+`/workspace` is used by the editor and language servers. `/algator-root` is the target folder for synchronisation.
+
+### 3. Open the editor
+
+Open `editor.html` directly in Chrome or Edge, or serve the project with a static server.
+
+```bash
+npx serve . -l 8080
+```
+
+Then open:
+
+```text
+http://localhost:8080/editor.html
+```
+
+Do not use port `3000` for the static frontend if the Docker LSP bridge is already using that port.
+
+---
+
+## Docker Options
+
+### Enable or disable lsyncd at runtime
+
+Enable lsyncd:
+
+```bash
+-e ENABLE_LSYNC=true
+```
+
+Disable lsyncd:
+
+```bash
+-e ENABLE_LSYNC=false
+```
+
+When lsyncd is disabled, the background watcher is not started. The editor can still write files to `/workspace`; only automatic background watching/syncing is disabled.
+
+### Set the initial sync root
+
+```bash
+-e SYNC_ROOT=main
+```
+
+This means:
+
+```text
+/workspace/main      ->      /algator-root/main
+```
+
+The sync root is recursive, so all subfolders inside `main` are included.
+
+If `SYNC_ROOT` is empty or omitted, the whole workspace is used:
+
+```text
+/workspace           ->      /algator-root
+```
+
+### Build Docker without installing lsyncd
+
+If your `Dockerfile` supports the `INSTALL_LSYNC` build argument, you can build without lsyncd:
+
+```bash
+docker build -f langserver/docker/Dockerfile \
+  -t smartcode-lsp \
+  --build-arg INSTALL_LSYNC=false \
+  langserver/
+```
+
+If you build without lsyncd, also run the container with:
+
+```bash
+-e ENABLE_LSYNC=false
+```
 
 ---
 
 ## Usage Modes
 
-SmartCode supports three distinct usage modes set at initialisation time.
+SmartCode uses named constants instead of numeric modes.
 
-### Mode 1 — Project mode (default)
+```js
+smartCodeEditor.editorMode.PROJECT
+smartCodeEditor.editorMode.FOLDER
+smartCodeEditor.editorMode.SINGLE
+```
 
-Full multi-file editor with tabs, autosave, and project files. Best for standalone use.
+### Project mode
+
+Project mode is the default full editor. It includes toolbar buttons, tabs, status bar, autosave and diagnostics.
 
 ```js
 var ed = smartCodeEditor.initEditor(
-  "editorDiv",   // container element id
-  true,          // show toolbar
-  true,          // show tab bar + status bar
-  true,          // show diagnostics panel
-  smartCodeEditor.editorMode.PROJECT
+  "editorDiv",
+
+  true,  // showToolbar: shows the top toolbar with New, Open and Save buttons
+  true,  // showTabStatusbar: shows file tabs and the bottom status bar
+  true,  // showDiagnostics: shows diagnostics, errors and warnings
+
+  smartCodeEditor.editorMode.PROJECT,
+
+  {
+    // Empty syncRoot means the whole /workspace is synced.
+    syncRoot: "",
+
+    // Enables or disables background lsyncd watching.
+    lsyncEnabled: true
+  }
 );
 ```
 
-Users open a project (a JSON file listing source files) or a directory. All open files are visible to the LSP simultaneously, so cross-file completions and diagnostics work correctly.
-
-**Opening a project programmatically:**
-
-```js
-ed.openProject({
-  id:         "my-project",
-  name:       "My Project",
-  files:      [{ path: "Main.java", content: "..." }, { path: "Helper.java", content: "..." }],
-  activeFile: "Main.java"
-});
-```
-
-**Opening a folder:**
-
-```js
-ed.openDirectoryProject();   // opens native directory picker
-```
-
-### `editorMode.FOLDER` — Folder workspace mode
-
-Same as mode 1, but opens directly into a directory picker at startup. Suitable for embedding in tools where the user always works with a folder.
-
-```js
-var ed = smartCodeEditor.initEditor("editorDiv", true, true, true, smartCodeEditor.editorMode.FOLDER);
-```
-
-### Mode 3 — ALGator mode (isolated single-file editor)
-
-No tabs, no autosave, no concept of filenames. Designed for embedding multiple independent editors on one page. Each instance is completely isolated.
+If your project is inside a specific folder, use that folder as the sync root:
 
 ```js
 var ed = smartCodeEditor.initEditor(
-  "editorDiv",   // container element id
-  false,         // no toolbar
-  false,         // no tab bar / status bar
-  true,          // show diagnostics panel (auto-hides when no errors)
-  3,             // mode
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.PROJECT,
   {
-    language: "java",       // "java" | "c" | "cpp"
-    folder:   "mylib/src"   // optional — workspace subfolder for LSP context files
+    folder: "main",
+    syncRoot: "main",
+    lsyncEnabled: true
+  }
+);
+```
+
+This uses:
+
+```text
+/workspace/main      ->      /algator-root/main
+```
+
+including all subfolders.
+
+### Folder mode
+
+Folder mode opens the native directory picker at startup.
+
+```js
+var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.FOLDER,
+  {
+    syncRoot: "",
+    lsyncEnabled: true
+  }
+);
+```
+
+This mode is useful when the user always works with a local folder.
+
+### Single embedded editor mode
+
+Single mode is intended for embedding one isolated editor inside another web application. It does not use tabs or the full project UI.
+
+```js
+var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+
+  false, // no toolbar
+  false, // no tabs or status bar
+  true,  // diagnostics panel is enabled
+
+  smartCodeEditor.editorMode.SINGLE,
+
+  {
+    language: "java",
+
+    // Folder used as context for LSP completions and diagnostics.
+    folder: "main/src",
+
+    // Folder watched/synchronised recursively.
+    syncRoot: "main",
+
+    // Enables or disables background lsyncd.
+    lsyncEnabled: true
   }
 );
 
 ed.whenReady().then(() => {
-  ed.setContent("public class Main {\n    // ...\n}");
-  console.log(ed.getContent());
+  ed.setContent("public class Main {\n    public static void main(String[] args) {\n    }\n}", "java");
 });
 ```
 
-In mode 3 the diagnostics panel **automatically shows when there are errors/warnings and hides when there are none**. Multiple editors on the same page share the single LSP bridge connection but each maintains its own virtual file URI so completions and diagnostics are independent.
+For Java cross-file autocomplete, make sure `folder` points to the directory that contains the related `.java` files, or to a parent folder that includes them.
+
+---
+
+## Synchronisation Behaviour
+
+### `syncRoot`
+
+`syncRoot` is a relative path inside `/workspace`.
+
+```js
+syncRoot: "main"
+```
+
+means:
+
+```text
+/workspace/main      ->      /algator-root/main
+```
+
+All subfolders inside `main` are included.
+
+```js
+syncRoot: ""
+```
+
+means:
+
+```text
+/workspace           ->      /algator-root
+```
+
+### `lsyncEnabled`
+
+`lsyncEnabled` controls the background lsyncd watcher.
+
+```js
+lsyncEnabled: true
+```
+
+starts or keeps lsyncd active.
+
+```js
+lsyncEnabled: false
+```
+
+stops or disables lsyncd.
+
+### Change sync root at runtime
+
+```js
+await ed.setSyncRoot("main2", true);
+```
+
+This changes the sync root to:
+
+```text
+/workspace/main2     ->      /algator-root/main2
+```
+
+### Disable lsyncd at runtime
+
+```js
+await ed.setLsyncEnabled(false);
+```
+
+### Enable lsyncd again
+
+```js
+await ed.setLsyncEnabled(true);
+```
+
+### Sync the whole workspace
+
+```js
+await ed.setSyncRoot("", true);
+```
+
+This means:
+
+```text
+/workspace           ->      /algator-root
+```
 
 ---
 
 ## API Reference
 
-All modes return an `EditorAPI` object with the following methods.
+All modes return an `EditorAPI` object.
 
 | Method | Description |
 |---|---|
-| `setContent(code, language?)` | Set editor content. Optionally switch language (`"java"`, `"c"`, `"cpp"`). |
-| `getContent()` | Return current editor content as a string. |
-| `setLanguage(lang)` | Switch language mode without changing content. |
-| `getLanguage()` | Return current language string. |
-| `setReadOnly(bool)` | Enable or disable read-only mode. |
-| `focus()` | Give focus to the editor. |
-| `save()` | Manually trigger save (modes 1/2 only). |
-| `openFile(filename)` | Open a file by name (modes 1/2 only). |
-| `openProject(project)` | Load a project object (mode 1 only). |
-| `openDirectoryProject()` | Open native directory picker (modes 1/2 only). |
-| `getProjectInfo()` | Return current project metadata (modes 1/2 only). |
-| `setDiagnosticsVisible(bool)` | Show or hide the diagnostics panel. |
-| `setToolbarVisible(bool)` | Show or hide the toolbar (modes 1/2 only). |
-| `setTabStatusbarVisible(bool)` | Show or hide tabs and status bar (modes 1/2 only). |
-| `onChange(fn)` | Register a callback `fn(content, filename)` called on every edit. |
-| `onSave(fn)` | Register a callback `fn(content, filename)` called on save. |
-| `onFileOpen(fn)` | Register a callback `fn(filename, language)` called when a file is opened. |
-| `whenReady()` | Returns a Promise that resolves when the editor (and LSP) are ready. |
-| `destroy()` | Clean up the editor instance and close its LSP file. |
+| `setContent(code, language?)` | Sets editor content. Optionally switches language: `"java"`, `"c"` or `"cpp"`. |
+| `getContent()` | Returns current editor content. |
+| `setLanguage(lang)` | Changes editor language without changing content. |
+| `getLanguage()` | Returns current language. |
+| `setReadOnly(bool)` | Enables or disables read-only mode. |
+| `focus()` | Focuses the editor. |
+| `save()` | Manually saves the active file. Available in project/folder modes. |
+| `openFile(filename)` | Opens a file by name. Available in project/folder modes. |
+| `openProject(project)` | Loads a project object. Available in project mode. |
+| `openDirectoryProject()` | Opens the native directory picker. Available in project/folder modes. |
+| `getProjectInfo()` | Returns current project metadata. Available in project/folder modes. |
+| `setDiagnosticsVisible(bool)` | Shows or hides diagnostics. |
+| `setToolbarVisible(bool)` | Shows or hides the toolbar. |
+| `setTabStatusbarVisible(bool)` | Shows or hides tabs and the status bar. |
+| `setSyncRoot(syncRoot, lsyncEnabled?)` | Changes the active sync root and optionally enables/disables lsyncd. |
+| `setLsyncEnabled(bool)` | Enables or disables the background lsyncd watcher. |
+| `onChange(fn)` | Registers `fn(content, filename)` callback for edits. |
+| `onSave(fn)` | Registers `fn(content, filename)` callback for saves. |
+| `onFileOpen(fn)` | Registers `fn(filename, language)` callback for file opening. |
+| `whenReady()` | Returns a Promise that resolves when the editor is ready. |
+| `destroy()` | Cleans up the editor instance. |
 | `.cm` | Direct access to the underlying CodeMirror instance. |
 
 ---
 
 ## LSP Bridge HTTP API
 
-The bridge exposes a small REST API alongside the WebSocket endpoints.
-
 | Endpoint | Method | Description |
 |---|---|---|
-| `/health` | GET | Returns server status, connected client counts, workspace file list. |
-| `/scan?folder=path` | GET | Returns all files under `workspace/path` recursively. Omit `folder` to scan the whole workspace. |
-| `/workspace/path/to/file` | GET | Read a file from the workspace (supports subdirectory paths). |
-| `/workspace/path/to/file` | POST | Write a file to the workspace. Body is plain text. |
+| `/health` | GET | Returns bridge status, LSP status, sync state and file list. |
+| `/scan?folder=path` | GET | Recursively scans `/workspace/path`. Omit `folder` to scan all workspace. |
+| `/workspace/path/to/file` | GET | Reads a file from `/workspace`. |
+| `/workspace/path/to/file` | POST | Writes a file to `/workspace`. |
+| `/workspace-patch/path/to/file` | POST | Applies a CodeMirror-style text patch to a workspace file. |
+| `/sync-root` | POST | Sets `syncRoot` and `lsyncEnabled`. |
+| `/notify` | POST | Sends file-change notification to the Java language server. |
+| `/algator/path/to/file` | POST | Writes a file into both `/algator-root` and `/workspace`. |
+| `/projects` | GET | Lists directories in `/algator-root`. |
+
+Example `/sync-root` request:
+
+```js
+await fetch("http://localhost:3000/sync-root", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    syncRoot: "main",
+    lsyncEnabled: true
+  })
+});
+```
 
 WebSocket endpoints:
 
 | Path | Language server |
 |---|---|
-| `ws://host:3000/` | clangd (C/C++) |
-| `ws://host:3000/java` | Eclipse JDT LS (Java) |
+| `ws://localhost:3000/` | clangd for C/C++ |
+| `ws://localhost:3000/java` | Eclipse JDT Language Server for Java |
 
 ---
 
 ## Project File Format
 
-A project is a plain JSON file that can be stored anywhere on the user's machine.
+A project is a plain JavaScript/JSON object.
 
 ```json
 {
-  "id":         "my-project",
-  "name":       "My Project",
+  "id": "my-project",
+  "name": "My Project",
   "files": [
-    { "path": "Main.java",   "content": "public class Main { ... }" },
-    { "path": "Helper.java", "content": "public class Helper { ... }" }
+    {
+      "path": "Main.java",
+      "content": "public class Main { }"
+    },
+    {
+      "path": "Helper.java",
+      "content": "public class Helper { }"
+    }
   ],
   "activeFile": "Main.java"
 }
 ```
 
-The `workspace` folder on the server is used only as a temporary staging area for the LSP. Users do not need to know about it.
+Programmatic opening:
+
+```js
+await ed.openProject({
+  id: "my-project",
+  name: "My Project",
+  files: [
+    { path: "Main.java", content: "public class Main { }" },
+    { path: "Helper.java", content: "public class Helper { }" }
+  ],
+  activeFile: "Main.java"
+});
+```
+
+---
+
+## Java Cross-File IntelliSense
+
+For Java autocomplete between files, all related `.java` files must be visible to JDT LS.
+
+Example structure:
+
+```text
+workspace/
+  main/
+    src/
+      Main.java
+      Helper.java
+```
+
+Recommended initialisation:
+
+```js
+var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.PROJECT,
+  {
+    folder: "main/src",
+    syncRoot: "main",
+    lsyncEnabled: true
+  }
+);
+```
+
+Example code:
+
+```java
+public class Main {
+    public static void main(String[] args) {
+        Helper helper = new Helper();
+        helper.
+    }
+}
+```
+
+```java
+public class Helper {
+    public int add(int a, int b) {
+        return a + b;
+    }
+}
+```
+
+At `helper.` the autocomplete should include `add`.
+
+If you write `Helper.` instead of creating an object, Java will only show static methods.
 
 ---
 
 ## Configuration
 
-Edit `js/config.js` to change server URLs, timeouts, and completion behaviour.
+Edit `js/config.js` to change server URLs and editor timings.
 
 ```js
-const CFG = Object.freeze({
+const SmartCodeConfig = Object.freeze({
   server: {
-    wsUrl:      "ws://localhost:3000",
-    javaWsUrl:  "ws://localhost:3000/java",
-    httpUrl:    "http://localhost:3000"
+    httpUrl: "http://localhost:3000",
+    wsClangd: "ws://localhost:3000",
+    wsJava: "ws://localhost:3000/java"
   },
+
+  workspace: {
+    rootUri: "file:///workspace"
+  },
+
   editor: {
-    completionDelay:  120,   // ms after trigger character (. -> ::)
-    identifierDelay:  300,   // ms after typing identifier characters
-    memberMaxItems:   40,
-    identifierMax:    20,
-    javaMemberMax:    60
-  },
-  java: {
-    initDelay:        1200   // ms to wait for jdtls initialisation
+    completionDelay: 120,
+    identifierDelay: 300,
+    autosaveDelay: 1500,
+    javaInitDelay: 1200,
+    javaRetryDelay: 1500,
+    memberMaxItems: 40,
+    identifierMax: 20,
+    javaMemberMax: 60
   }
 });
 ```
 
 ---
 
-## Folder Structure
+## Recommended Folder Structure
 
-```
-smartcode/
+```text
+smartCodev3/
 │
-├── editor.html                 # Entry point — open this in the browser
+├── editor.html
 │
-├── src/                        # Editor front-end source
+├── js/
+│   ├── config.js
+│   ├── editorMain.js
+│   └── smartCodeEditor.js
+│
+├── css/
+│   └── editorStyle.css
+│
+├── img/
+│   ├── smartCodeLogo.svg
+│   └── smartCodeLogo2.svg
+│
+├── codemirror/
+│
+├── langserver/
 │   ├── js/
-│   │   ├── config.js           # Server URLs, timeouts, completion limits
-│   │   ├── editorMain.js       # Core editor logic (tabs, files, diagnostics, LSP integration)
-│   │   └── smartCodeEditor.js  # Public API — initEditor() factory
-│   │
-│   ├── css/
-│   │   └── editorStyle.css     # All editor styles
-│   │
-│   └── img/
-│       ├── smartCodeLogo.svg
-│       └── smartCodeLogo2.svg
-│
-├── lib/                        # Third-party libraries (not modified)
-│   └── codemirror/             # CodeMirror 5 distribution
-│
-├── server/                     # LSP bridge (runs in Docker)
-│   ├── Dockerfile
+│   │   ├── lspClient.js
+│   │   └── server.js
+│   ├── docker/
+│   │   ├── Dockerfile
+│   │   ├── start.sh
+│   │   └── lsyncd.conf.lua
 │   ├── package.json
-│   ├── package-lock.json
-│   ├── server.js               # HTTP + WebSocket server, clangd + jdtls management
-│   ├── lspClient.js            # Client-side WebSocket ↔ LSP JSON-RPC adapter
-│   └── start.sh                # Container entrypoint (cmake + node)
+│   └── package-lock.json
 │
-└── workspace/                  # Runtime workspace mounted into the Docker container
-    ├── .classpath              # Eclipse JDT project descriptor
-    ├── .project
-    ├── .settings/
-    ├── CMakeLists.txt          # clangd compile commands source
-    └── compile_commands.json   # Generated by cmake at container start
+├── workspace/
+│
+└── algator-root/
 ```
 
-> **Current structure note:** `lspClient.js` currently lives inside `langserver/js/` alongside the server code. It is a **browser** file (loaded by `editor.html`) and should be moved to `src/js/` to make the separation between front-end and back-end code clear. See the recommended structure above.
+`workspace/` is the LSP working directory. `algator-root/` is the synchronisation target.
 
 ---
 
@@ -280,17 +598,22 @@ smartcode/
 
 | Component | Requirement |
 |---|---|
-| Browser | Chrome or Edge 86+ (File System Access API) |
+| Browser | Chrome or Edge 86+ |
 | Docker | 20.10+ |
-| Server RAM | ≥ 2 GB recommended (jdtls alone uses ~500 MB) |
-| Disk | ~1 GB for the Docker image (JDK 21 + clangd + jdtls) |
+| Java server | JDK 21 inside Docker |
+| C/C++ server | clangd inside Docker |
+| Server RAM | At least 2 GB recommended |
+| Disk | Around 1 GB for the Docker image |
 
 ---
 
 ## Known Limitations
 
-- C/C++ IntelliSense works best when a `CMakeLists.txt` is present so clangd can read `compile_commands.json`. Without it clangd uses fallback flags and may miss includes.
-- Each page load starts a fresh LSP session; there is no persistent index cache between sessions.
+- The File System Access API is supported mainly in Chrome and Edge.
+- C/C++ IntelliSense is best when `compile_commands.json` is available.
+- Java cross-file autocomplete requires the related files to be in the LSP workspace and opened or scanned by the editor.
+- If lsyncd is disabled, changes made outside the editor may not automatically propagate to `/algator-root`.
+- Each page load starts a new browser-side editor session.
 
 ---
 
