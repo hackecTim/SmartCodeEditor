@@ -1,13 +1,14 @@
+//Preveri odvisnosti
 if (typeof SmartCodeConfig === "undefined") throw new Error("config.js ni naložen!");
 if (typeof CodeMirror === "undefined") throw new Error("codemirror.js ni naložen!");
 
 let editor;
-const config = SmartCodeConfig;
+const CFG = SmartCodeConfig;
 
 const fileStates = new Map();
 let activeFile = null;
 
-let diagnosticMarkers = [];
+let diagnosticMarks = [];
 const diagnosticsByFile = new Map();
 
 let autosaveTimer = null;
@@ -15,27 +16,30 @@ let completionTimer = null;
 let signatureTimer = null;
 let isFileSwitch = false;
 let suppressInputRead = false;
-let completionRequestSequence = 0;
+let completionReqSeq = 0;
 let clangdInitialized = false;
 let javaInitialized = false;
-const openedDocumentUris = new Set();
+const openedDocs = new Set();
 
-let projectFolderHandle = null;
+let activeFolderHandle = null;
 
 // Project state: standalone mode ne naloži ničesar avtomatsko.
+// Datoteke obstajajo šele znotraj aktivnega projekta.
 let activeProject = null;
-let storageEnabled = false;
+let browserPersistenceEnabled = false;
 
-const debugLspEnabled = false;
+const DEBUG_LSP = false;
 
-// helpers
+//──────────────────────────────────────────────────────────────────────
+// Helperji
+//──────────────────────────────────────────────────────────────────────
 
 function debugLog(...args) {
-  if (debugLspEnabled) console.log(...args);
+  if (DEBUG_LSP) console.log(...args);
 }
 
 function hasServerSupport() {
-  return !!(config.server?.httpUrl && config.server?.wsClangd && config.server?.wsJava);
+  return !!(CFG.server?.httpUrl && CFG.server?.wsClangd && CFG.server?.wsJava);
 }
 
 function supportsFsAccess() {
@@ -89,7 +93,9 @@ function severityToLabel(severity) {
   return "Hint";
 }
 
-// browser cache
+//──────────────────────────────────────────────────────────────────────
+// Browser cache
+//──────────────────────────────────────────────────────────────────────
 
 function cacheKeyForFile(filename) {
   return `smartcode:${currentStorageNamespace()}:file:${normalizePath(filename)}`;
@@ -104,7 +110,7 @@ function activeProjectKey() {
 }
 
 function persistFileListToBrowser() {
-  if (!storageEnabled || !activeProject) return;
+  if (!browserPersistenceEnabled || !activeProject) return;
 
   try {
     localStorage.setItem(cacheFileListKey(), JSON.stringify([...fileStates.keys()]));
@@ -119,7 +125,7 @@ function persistFileListToBrowser() {
 }
 
 function persistFileToBrowser(filename, content) {
-  if (!storageEnabled || !activeProject) return false;
+  if (!browserPersistenceEnabled || !activeProject) return false;
 
   try {
     localStorage.setItem(cacheKeyForFile(filename), content ?? "");
@@ -140,7 +146,7 @@ function readFileFromBrowser(filename) {
 }
 
 function loadBrowserWorkspace(projectMeta = null) {
-  if (!storageEnabled || !activeProject) return;
+  if (!browserPersistenceEnabled || !activeProject) return;
 
   try {
     if (projectMeta) {
@@ -169,7 +175,9 @@ function loadBrowserWorkspace(projectMeta = null) {
   }
 }
 
-// language detection
+//──────────────────────────────────────────────────────────────────────
+// Jezik iz končnice
+//──────────────────────────────────────────────────────────────────────
 
 function modeForFile(filename) {
   const f = normalizePath(filename).toLowerCase();
@@ -200,7 +208,7 @@ const themes = {
 };
 
 function uriForFile(filename) {
-  return `${config.workspace.rootUri}/${normalizePath(filename)}`;
+  return `${CFG.workspace.rootUri}/${normalizePath(filename)}`;
 }
 
 function isClangdFile(filename) {
@@ -271,13 +279,16 @@ function ensureFileState(filename, extra = {}) {
   return fileStates.get(key);
 }
 
+//Docstate iz aktivne datoteke
 function docState() {
   const st = fileStates.get(activeFile);
   if (!st) return { uri: "", languageId: "plaintext", version: 1 };
   return st;
 }
 
-// local file handles
+//──────────────────────────────────────────────────────────────────────
+// Lokalni file handles
+//──────────────────────────────────────────────────────────────────────
 
 async function readHandleText(handle) {
   const file = await handle.getFile();
@@ -287,11 +298,11 @@ async function readHandleText(handle) {
 async function ensureLocalHandleForState(filename, st) {
   if (st.handle) return st.handle;
 
-  if (projectFolderHandle) {
+  if (activeFolderHandle) {
     const parts = normalizePath(filename).split("/").filter(Boolean);
     if (!parts.length) return null;
 
-    let dir = projectFolderHandle;
+    let dir = activeFolderHandle;
     for (const segment of parts.slice(0, -1)) {
       dir = await dir.getDirectoryHandle(segment, { create: true });
     }
@@ -314,7 +325,7 @@ async function ensureLocalHandleForState(filename, st) {
 async function loadContentForState(filename, st) {
   const norm = normalizePath(filename);
 
-  
+  // 1) Če je datoteka odprta iz lokalnega folderja, beri direktno iz nje
   if (st.handle) {
     try {
       const text = await readHandleText(st.handle);
@@ -325,12 +336,14 @@ async function loadContentForState(filename, st) {
       console.warn("Local file read failed:", norm, e.message);
     }
   }
- 
+
+  // 2) Če obstaja server workspace, naj ima prednost pred browser cache
   if (hasServerSupport()) {
     try {
-      const res = await fetch(`${config.server.httpUrl}/workspace/${escapePathSegment(norm)}`, {
+      const res = await fetch(`${CFG.server.httpUrl}/workspace/${escapePathSegment(norm)}`, {
         cache: "no-store"
       });
+
       if (res.ok) {
         const text = await res.text();
         st.content = text;
@@ -341,13 +354,15 @@ async function loadContentForState(filename, st) {
       console.warn("Workspace file read failed:", norm, e.message);
     }
   }
- 
+
+  // 3) Browser cache je samo fallback
   const cached = readFileFromBrowser(norm);
   if (cached !== null) {
     st.content = cached;
     return cached;
   }
 
+  // 4) Default snippet samo če datoteka res nima nobene vsebine
   st.content = defaultSnippet(norm);
   return st.content;
 }
@@ -379,7 +394,8 @@ async function writeStateToLocal(filename, st, { promptIfNeeded = true } = {}) {
   return true;
 }
 
-// server mirror
+//──────────────────────────────────────────────────────────────────────
+//──────────────────────────────────────────────────────────────────────
 
 async function syncFileToServer(filename, content) {
   if (!hasServerSupport()) return false;
@@ -389,7 +405,7 @@ async function syncFileToServer(filename, content) {
   if (!rel) return false;
 
   try {
-    const res = await fetch(`${config.server.httpUrl}/workspace/${escapePathSegment(rel)}`, {
+    const res = await fetch(`${CFG.server.httpUrl}/workspace/${escapePathSegment(rel)}`, {
       method: "POST",
       headers: { "Content-Type": "text/plain; charset=utf-8" },
       body: content ?? ""
@@ -421,7 +437,31 @@ async function notifyServerFileChange(filename, type = 2) {
   }
 }
 
-// lsp routing
+async function setServerSyncRoot(syncRoot = "", lsyncEnabled = false) {
+  if (!hasServerSupport()) return false;
+
+  const root = normalizePath(syncRoot || "").replace(/\/+$/, "");
+
+  try {
+    const res = await fetch(`${CFG.server.httpUrl}/sync-root`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        syncRoot: root,
+        lsyncEnabled: lsyncEnabled === true
+      })
+    });
+
+    return res.ok;
+  } catch (e) {
+    console.warn("setServerSyncRoot failed:", e.message);
+    return false;
+  }
+}
+
+//──────────────────────────────────────────────────────────────────────
+// LSP routing
+//──────────────────────────────────────────────────────────────────────
 
 function lspRequest(method, params) {
   if (!hasServerSupport()) return Promise.reject(new Error("No server"));
@@ -455,9 +495,11 @@ function lspReady() {
   return false;
 }
 
-// signature hints
+//──────────────────────────────────────────────────────────────────────
+// Signature hint
+//──────────────────────────────────────────────────────────────────────
 
-let signatureElement = null;
+let sigEl = null;
 
 function showSignatureHint(html) {
   if (!html) {
@@ -465,26 +507,26 @@ function showSignatureHint(html) {
     return;
   }
 
-  if (!signatureElement) {
-    signatureElement = document.createElement("div");
-    signatureElement.className = "cm-signature-hint";
-    document.body.appendChild(signatureElement);
+  if (!sigEl) {
+    sigEl = document.createElement("div");
+    sigEl.className = "cm-signature-hint";
+    document.body.appendChild(sigEl);
   }
 
-  signatureElement.innerHTML = html;
-  signatureElement.style.display = "block";
+  sigEl.innerHTML = html;
+  sigEl.style.display = "block";
 
   requestAnimationFrame(() => {
-    if (!signatureElement || !editor) return;
+    if (!sigEl || !editor) return;
     const cur = editor.getCursor();
     const coords = editor.charCoords({ line: cur.line, ch: cur.ch }, "window");
-    signatureElement.style.left = Math.max(4, coords.left) + "px";
-    signatureElement.style.top = (coords.top - signatureElement.offsetHeight - 8) + "px";
+    sigEl.style.left = Math.max(4, coords.left) + "px";
+    sigEl.style.top = (coords.top - sigEl.offsetHeight - 8) + "px";
   });
 }
 
 function hideSignatureHint() {
-  if (signatureElement) signatureElement.style.display = "none";
+  if (sigEl) sigEl.style.display = "none";
 }
 
 function callDepth() {
@@ -518,10 +560,12 @@ function scheduleSignatureRefresh(triggerChar, isRetrigger, delay) {
   signatureTimer = setTimeout(() => {
     if (callDepth() > 0) requestSignatureHelp(triggerChar, isRetrigger);
     else hideSignatureHint();
-  }, delay ?? config.editor.completionDelay);
+  }, delay ?? CFG.editor.completionDelay);
 }
 
-// completion funkcije
+//──────────────────────────────────────────────────────────────────────
+// Completion pomoč
+//──────────────────────────────────────────────────────────────────────
 
 function stripSnippets(text) {
   if (!text) return "";
@@ -555,23 +599,23 @@ function getFunctionName(item) {
 // Vrne ikono in barvo glede na LSP completion item kind
 function getKindInfo(kind) {
   switch (kind) {
-    case 1:  return { icon: "⊡", color: "#888" };
-    case 2:  return { icon: "m", color: "#c792ea" };
-    case 3:  return { icon: "ƒ", color: "#82aaff" };
-    case 4:  return { icon: "C", color: "#f78c6c" };
-    case 5:  return { icon: "◈", color: "#ffcb6b" };
-    case 6:  return { icon: "m", color: "#c792ea" };
-    case 7:  return { icon: "C", color: "#f78c6c" };
-    case 8:  return { icon: "I", color: "#89ddff" };
-    case 9:  return { icon: "M", color: "#c3e88d" };
-    case 10: return { icon: "◈", color: "#ffcb6b" };
-    case 11: return { icon: "e", color: "#f78c6c" };
-    case 12: return { icon: "=", color: "#c3e88d" };
-    case 13: return { icon: "∈", color: "#f78c6c" };
-    case 14: return { icon: "k", color: "#ff5370" };
-    case 15: return { icon: "S", color: "#89ddff" };
-    case 16: return { icon: "#", color: "#ffcb6b" };
-    case 17: return { icon: "F", color: "#888" };
+    case 1:  return { icon: "⊡", color: "#888" };          // Text
+    case 2:  return { icon: "m", color: "#c792ea" };        // Method
+    case 3:  return { icon: "ƒ", color: "#82aaff" };        // Function
+    case 4:  return { icon: "C", color: "#f78c6c" };        // Constructor
+    case 5:  return { icon: "◈", color: "#ffcb6b" };        // Field
+    case 6:  return { icon: "m", color: "#c792ea" };        // Variable (method-like)
+    case 7:  return { icon: "C", color: "#f78c6c" };        // Class
+    case 8:  return { icon: "I", color: "#89ddff" };        // Interface
+    case 9:  return { icon: "M", color: "#c3e88d" };        // Module
+    case 10: return { icon: "◈", color: "#ffcb6b" };        // Property
+    case 11: return { icon: "e", color: "#f78c6c" };        // Unit
+    case 12: return { icon: "=", color: "#c3e88d" };        // Value
+    case 13: return { icon: "∈", color: "#f78c6c" };        // Enum
+    case 14: return { icon: "k", color: "#ff5370" };        // Keyword
+    case 15: return { icon: "S", color: "#89ddff" };        // Snippet
+    case 16: return { icon: "#", color: "#ffcb6b" };        // Color
+    case 17: return { icon: "F", color: "#888" };           // File
     default: return { icon: "·", color: "#888" };
   }
 }
@@ -663,96 +707,26 @@ function appendLabelWithBoldPrefix(labelSpan, label, prefix) {
   labelSpan.appendChild(document.createTextNode(text.slice(idx + p.length)));
 }
 
-function forceActiveHintClass(cm, index = 0) {
-  const widget = cm?.state?.completionActive?.widget;
-  const menu = document.querySelector(".CodeMirror-hints");
-  if (!widget || !menu) return;
-
-  const rows = [...menu.querySelectorAll(".CodeMirror-hint")];
-  if (!rows.length) return;
-
-  const safeIndex = Math.max(0, Math.min(index, rows.length - 1));
-
-  rows.forEach(row => row.classList.remove("CodeMirror-hint-active"));
-  rows[safeIndex].classList.add("CodeMirror-hint-active");
-
-  widget.selectedHint = safeIndex;
-  rows[safeIndex].scrollIntoView({ block: "nearest" });
-}
-function markSmartCodeHintOpened(cm) {
-  if (!cm) return;
-
-  cm.smartCodeFirstHintDown = false;
-
-  setTimeout(() => {
-    forceActiveHintClass(cm, 0);
-    installHintMouseHover(cm);
-  }, 0);
-}
-
-function smartCodeHintNavigationKeys() {
-  return {
-    Down(cm, handle) {
-      if (cm.smartCodeFirstHintDown) {
-	  cm.smartCodeFirstHintDown = false;
-	  forceActiveHintClass(cm, 0);
-	  return;
-	}
-
-      if (handle && typeof handle.moveFocus === "function") {
-        handle.moveFocus(1);
-      } else {
-        const widget = cm.state?.completionActive?.widget;
-		if (widget && typeof widget.selectedHint === "number") {
-		  forceActiveHintClass(cm, widget.selectedHint);
-		} else {
-		  scrollActiveHintIntoView();
-		}
-      }
-    },
-
-    Up(cm, handle) {
-      cm.smartCodeFirstHintDown = false;
-
-      if (handle && typeof handle.moveFocus === "function") {
-        handle.moveFocus(-1);
-      } else {
-        const w = cm.state?.completionActive?.widget;
-        if (w && typeof w.changeActive === "function") {
-          const cur = typeof w.selectedHint === "number" ? w.selectedHint : 0;
-          w.changeActive(cur - 1);
-        }
-      }
-    },
-
-    PageDown(cm, handle) {
-      cm.smartCodeFirstHintDown = false;
-      if (handle && typeof handle.moveFocus === "function") {
-        handle.moveFocus((handle.menuSize?.() || 5) - 1, true);
-      }
-    },
-
-    PageUp(cm, handle) {
-      cm.smartCodeFirstHintDown = false;
-      if (handle && typeof handle.moveFocus === "function") {
-        handle.moveFocus(-((handle.menuSize?.() || 5) - 1), true);
-      }
-    }
-  };
-}
-
-// startup
+//──────────────────────────────────────────────────────────────────────
+// Startup
+//──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
 
+  // ── Mode 3 (embedded): samo LSP, brez globalnega editorja ───────────
   if (window.smartCodeInitialMode === 3) {
     if (hasServerSupport()) {
+      const opts = window.smartCodeInitialOptions || {};
+      const hasSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
+      const syncRoot = hasSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
+      await setServerSyncRoot(syncRoot, opts.lsyncEnabled === true);
       initClangdLsp();
       initJavaLsp();
     }
     return;
   }
 
+  // ── Mode 1 / 2: normalni zagon ─────────────────────────────────────
   initEditor();
   initUI();
   renderTabs();
@@ -760,6 +734,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   setServerInfo("LSP: starting…");
 
   if (hasServerSupport()) {
+    const opts = window.smartCodeInitialOptions || {};
+    const hasSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
+    const syncRoot = hasSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
+    await setServerSyncRoot(syncRoot, opts.lsyncEnabled === true);
     initClangdLsp();
     initJavaLsp();
   } else {
@@ -767,12 +745,15 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 
-// editor setup
+//──────────────────────────────────────────────────────────────────────
+// Editor setup
+//──────────────────────────────────────────────────────────────────────
 
 function initEditor() {
-  const ta = document.getElementById("editor");
+  // Išče textarea znotraj .editor-wrapper, ne kontejnerski div
+  let ta = document.querySelector(".editor-wrapper textarea");
   if (!ta) {
-    console.error("Missing #editor");
+    setTimeout(initEditor, 50);
     return;
   }
 
@@ -791,40 +772,7 @@ function initEditor() {
       "Ctrl-S":     () => saveActiveFile(false),
       "Esc":        () => { hideSignatureHint(); editor.closeHint?.(); },
 
-      "Down": (cm) => {
-        if (cm.state.completionActive) {
-          smartCodeHintNavigationKeys().Down(cm, null);
-        } else {
-          cm.execCommand("goLineDown");
-        }
-        return;
-      },
-      "Up": (cm) => {
-        if (cm.state.completionActive) {
-          smartCodeHintNavigationKeys().Up(cm, null);
-        } else {
-          cm.execCommand("goLineUp");
-        }
-        return;
-      },
-      "PageDown": (cm) => {
-        if (cm.state.completionActive) {
-          smartCodeHintNavigationKeys().PageDown(cm, null);
-        } else {
-          cm.execCommand("goPageDown");
-        }
-        return;
-      },
-      "PageUp": (cm) => {
-        if (cm.state.completionActive) {
-          smartCodeHintNavigationKeys().PageUp(cm, null);
-        } else {
-          cm.execCommand("goPageUp");
-        }
-        return;
-      },
-
-      "Left": (cm) => {
+            "Left": (cm) => {
         cm.execCommand("goCharLeft");
         if (cm.state.completionActive) {
           clearTimeout(completionTimer);
@@ -836,7 +784,7 @@ function initEditor() {
         }
       },
 
-      "Right": (cm) => {
+            "Right": (cm) => {
         cm.execCommand("goCharRight");
         if (cm.state.completionActive) {
           clearTimeout(completionTimer);
@@ -854,6 +802,35 @@ function initEditor() {
   installEditorBoldStyles();
   updateEditorLanguageClass("text/plain");
   editor.refresh();
+
+  // Native keydown interceptor za autocomplete puščice.
+  // Capture phase (true) zagotovi, da se izvede PRED CodeMirrorjem.
+  editor.getWrapperElement().addEventListener("keydown", function(e) {
+    const hint = editor.state.completionActive;
+    if (!hint) return;
+    const w = hint.widget;
+    if (!w) return;
+
+    if (e.key === "ArrowDown" || e.key === "Down") {
+      e.preventDefault(); e.stopPropagation();
+      w.changeActive(w.selectedHint + 1);
+    } else if (e.key === "ArrowUp" || e.key === "Up") {
+      e.preventDefault(); e.stopPropagation();
+      w.changeActive(w.selectedHint - 1);
+    } else if (e.key === "PageDown") {
+      e.preventDefault(); e.stopPropagation();
+      w.changeActive(w.selectedHint + (w.screenAmount?.() || 5) - 1, true);
+    } else if (e.key === "PageUp") {
+      e.preventDefault(); e.stopPropagation();
+      w.changeActive(w.selectedHint - (w.screenAmount?.() || 5) + 1, true);
+    } else if (e.key === "Enter" || e.key === "Tab") {
+      e.preventDefault(); e.stopPropagation();
+      w.pick();
+    } else if (e.key === "Escape") {
+      e.preventDefault(); e.stopPropagation();
+      hint.close();
+    }
+  }, true); // capture:true — pred CodeMirrorjem
   editor.on("cursorActivity", () => {
   updateCursorInfo();
 
@@ -873,7 +850,7 @@ function initEditor() {
   }, 120);
 });
 
-  editor.on("change", (cm, change) => {
+  editor.on("change", (_cm, change) => {
   if (isFileSwitch) return;
 
   const changedFile = activeFile;
@@ -884,7 +861,7 @@ function initEditor() {
     st.dirty = true;
     st.content = editor.getValue();
 
-    persistFileToBrowser(changedFile, st.content);
+        persistFileToBrowser(changedFile, st.content);
 
     setAutosaveInfo("Autosave: pending…", "autosave-pending");
     renderTabs();
@@ -897,10 +874,10 @@ function initEditor() {
     }
 
     clearTimeout(autosaveTimer);
-    autosaveTimer = setTimeout(() => saveFile(changedFile, true), config.editor.autosaveDelay);
+    autosaveTimer = setTimeout(() => saveFile(changedFile, true), CFG.editor.autosaveDelay);
     
 	
-    if (isJava() && change.origin === "+input") {
+        if (isJava() && change.origin === "+input") {
       const inserted = Array.isArray(change.text) ? change.text.join("") : "";
       const ch = inserted ? inserted[inserted.length - 1] : "";
       if (/^[A-Za-z0-9_$]$/.test(ch)) {
@@ -909,7 +886,7 @@ function initEditor() {
       }
     }
 
-    if (change.origin === "+delete") {
+        if (change.origin === "+delete") {
       clearTimeout(completionTimer);
       const { prefix } = getTypedPrefixInfo();
 
@@ -922,7 +899,7 @@ function initEditor() {
     }
   });
 
-  editor.on("inputRead", (cm, change) => {
+  editor.on("inputRead", (_cm, change) => {
     if (suppressInputRead || !lspReady()) return;
     if (change.origin === "complete" || change.origin === "setValue") return;
 
@@ -936,21 +913,21 @@ function initEditor() {
     if (ch === ".") {
       clearTimeout(completionTimer);
       if (editor.state.completionActive) editor.closeHint?.();
-      completionTimer = setTimeout(() => requestCompletion("."), config.editor.completionDelay);
+      completionTimer = setTimeout(() => requestCompletion("."), CFG.editor.completionDelay);
       return;
     }
 
     if (ch === ">" && cur.ch >= 2 && line[cur.ch - 2] === "-") {
       clearTimeout(completionTimer);
       if (editor.state.completionActive) editor.closeHint?.();
-      completionTimer = setTimeout(() => requestCompletion(">"), config.editor.completionDelay);
+      completionTimer = setTimeout(() => requestCompletion(">"), CFG.editor.completionDelay);
       return;
     }
 
     if (ch === ":" && cur.ch >= 2 && line[cur.ch - 2] === ":") {
       clearTimeout(completionTimer);
       if (editor.state.completionActive) editor.closeHint?.();
-      completionTimer = setTimeout(() => requestCompletion(":"), config.editor.completionDelay);
+      completionTimer = setTimeout(() => requestCompletion(":"), CFG.editor.completionDelay);
       return;
     }
 
@@ -961,7 +938,7 @@ function initEditor() {
     }
 
     if (ch === ",") {
-      scheduleSignatureRefresh(",", true, config.editor.completionDelay);
+      scheduleSignatureRefresh(",", true, CFG.editor.completionDelay);
       return;
     }
 
@@ -974,23 +951,27 @@ function initEditor() {
       return;
     }
 
-    if (!isJava() && /^[a-zA-Z0-9_$]$/.test(ch)) {
+        if (!isJava() && /^[a-zA-Z0-9_$]$/.test(ch)) {
       clearTimeout(completionTimer);
-      completionTimer = setTimeout(() => requestCompletion(null), config.editor.identifierDelay);
+      completionTimer = setTimeout(() => requestCompletion(null), CFG.editor.identifierDelay);
     }
   });
 
   updateCursorInfo();
 }
 
-// file management
+//──────────────────────────────────────────────────────────────────────
+// File management
+//──────────────────────────────────────────────────────────────────────
 
 async function refreshFileList({ openFirst = false, includeServerWorkspace = false } = {}) {
   let files = [];
 
+  // Server /scan uporabljamo samo, če projekt to izrecno zahteva.
+  // Ob navadnem zagonu editorja se workspace ne odpre avtomatsko.
   if (includeServerWorkspace && hasServerSupport()) {
     try {
-      const res = await fetch(`${config.server.httpUrl}/scan`);
+      const res = await fetch(`${CFG.server.httpUrl}/scan`);
       if (res.ok) {
         const data = await res.json();
         files = (data.files || []).filter(f => isCodeFile(f));
@@ -1051,7 +1032,7 @@ function resetProject({ id, name, source = "api", persist = true } = {}) {
 
   fileStates.clear();
   diagnosticsByFile.clear();
-  openedDocumentUris.clear();
+  openedDocs.clear();
 
   activeProject = {
     id: safeProjectId(id || name || `project-${Date.now()}`),
@@ -1059,8 +1040,8 @@ function resetProject({ id, name, source = "api", persist = true } = {}) {
     source
   };
 
-  storageEnabled = persist !== false;
-  projectFolderHandle = null;
+  browserPersistenceEnabled = persist !== false;
+  activeFolderHandle = null;
   clearEditorForNoProject("");
 }
 
@@ -1138,7 +1119,7 @@ async function openDemoProject() {
   }
 
   try {
-    const res = await fetch(`${config.server.httpUrl}/project/demo`);
+    const res = await fetch(`${CFG.server.httpUrl}/project/demo`);
     if (!res.ok) throw new Error(await res.text());
     const project = await res.json();
     await openProjectFromFiles(project);
@@ -1163,20 +1144,20 @@ if (st.content === null) {
   await loadContentForState(norm, st);
 }
 
-  if (activeFile && activeFile !== norm) {
+    if (activeFile && activeFile !== norm) {
     const cur = fileStates.get(activeFile);
     if (cur) cur.content = editor.getValue();
   }
 
-  if (activeFile && activeFile !== norm) {
+    if (activeFile && activeFile !== norm) {
     const old = fileStates.get(activeFile);
-    if (old && isClangdFile(activeFile) && openedDocumentUris.has(old.uri)) {
+    if (old && isClangdFile(activeFile) && openedDocs.has(old.uri)) {
       sendDidCloseForFile(activeFile);
     }
   }
 
   activeFile = norm;
-  if (storageEnabled && activeProject) {
+  if (browserPersistenceEnabled && activeProject) {
     localStorage.setItem(`smartcode:${currentStorageNamespace()}:activeFile`, norm);
   }
 
@@ -1302,7 +1283,7 @@ async function closeTab(filename) {
 }
 
 function showTabContextMenu(filename, x, y) {
-  document.getElementById("sc-ctx-menu")?.remove();
+    document.getElementById("sc-ctx-menu")?.remove();
 
   const menu = document.createElement("div");
   menu.id = "sc-ctx-menu";
@@ -1324,7 +1305,7 @@ function showTabContextMenu(filename, x, y) {
 
   document.body.appendChild(menu);
 
-  const dismiss = (e) => {
+    const dismiss = (e) => {
     if (!menu.contains(e.target)) { menu.remove(); document.removeEventListener("mousedown", dismiss); }
   };
   setTimeout(() => document.addEventListener("mousedown", dismiss), 0);
@@ -1337,7 +1318,7 @@ async function deleteFile(filename) {
   sendDidCloseForFile(filename);
   fileStates.delete(filename);
 
-  if (storageEnabled && activeProject) {
+  if (browserPersistenceEnabled && activeProject) {
     localStorage.removeItem(cacheKeyForFile(filename));
   }
 
@@ -1362,8 +1343,7 @@ async function renameFile(filename) {
 
   const content = filename === activeFile ? editor.getValue() : (st.content || "");
 
-  // Shrani pod novim imenom
-  const newSt = createFileState(newName, {
+    const newSt = createFileState(newName, {
     content,
     handle: st.handle || null,
     dirty: false
@@ -1372,7 +1352,7 @@ async function renameFile(filename) {
   sendDidCloseForFile(filename);
   fileStates.delete(filename);
 
-  if (storageEnabled && activeProject) {
+  if (browserPersistenceEnabled && activeProject) {
     localStorage.removeItem(cacheKeyForFile(filename));
   }
 
@@ -1382,7 +1362,7 @@ async function renameFile(filename) {
 
   if (activeFile === filename) {
     activeFile = newName;
-    if (storageEnabled && activeProject) {
+    if (browserPersistenceEnabled && activeProject) {
       localStorage.setItem(`smartcode:${currentStorageNamespace()}:activeFile`, newName);
     }
   }
@@ -1392,11 +1372,13 @@ async function renameFile(filename) {
   if (lspReady()) sendDidOpenForFile(newName);
 }
 
+// UI buttons
 function initUI() {
   document.getElementById("newFileBtn")?.addEventListener("click", createNewFile);
   document.getElementById("demoProjectBtn")?.addEventListener("click", openDemoProject);
   document.getElementById("saveBtn")?.addEventListener("click", () => saveActiveFile(false));
 
+  // Open button: če browser podpira File System Access, uporabi to
   document.getElementById("openBtn")?.addEventListener("click", async () => {
     if (window.showOpenFilePicker) {
       await openFilesWithPicker();
@@ -1446,7 +1428,7 @@ async function createNewFile() {
           text: content
         }
       });
-      openedDocumentUris.add(st.uri);
+      openedDocs.add(st.uri);
     }
   }
 }
@@ -1558,7 +1540,7 @@ async function openFolderWorkspace() {
     persist: true
   });
 
-  projectFolderHandle = dirHandle;
+  activeFolderHandle = dirHandle;
 
   const entries = await walkDirectory(dirHandle);
   const files = entries.filter(e => isCodeFile(e.path) || shouldMirrorFile(e.path));
@@ -1588,12 +1570,14 @@ async function openFolderWorkspace() {
 
 window.openSmartCodeFolderProject = openFolderWorkspace;
 
-// clangd lsp
+//──────────────────────────────────────────────────────────────────────
+// LSP — clangd
+//──────────────────────────────────────────────────────────────────────
 
 function initClangdLsp() {
   if (typeof connectLsp !== "function") return;
 
-  connectLsp(config.server.wsClangd);
+  connectLsp(CFG.server.wsClangd);
 
   onLspOpen(async () => {
     if (clangdInitialized) return;
@@ -1602,16 +1586,16 @@ function initClangdLsp() {
     try {
       await sendLspRequest("initialize", {
         processId: null,
-        rootUri: config.workspace.rootUri,
+        rootUri: CFG.workspace.rootUri,
         capabilities: lspCapabilities()
       });
 
       sendLspNotification("initialized", {});
 
-      clangdInitialized = true;
+            clangdInitialized = true;
       if (isClangd()) setServerInfo("LSP: clangd ✓");
 
-      if (activeFile) {
+            if (activeFile) {
         sendDidOpenForFile(activeFile);
       }
     } catch (e) {
@@ -1633,24 +1617,26 @@ function initClangdLsp() {
   });
 }
 
-// java lsp
+//──────────────────────────────────────────────────────────────────────
+// LSP — jdtls
+//──────────────────────────────────────────────────────────────────────
 
 function initJavaLsp() {
   if (typeof connectJavaLsp !== "function") return;
 
-  connectJavaLsp(config.server.wsJava);
+  connectJavaLsp(CFG.server.wsJava);
 
   onJavaLspOpen(async () => {
   if (javaInitialized) return;
   if (isJava()) setServerInfo("LSP: jdtls connecting…");
 
-  await new Promise(r => setTimeout(r, config.editor.javaInitDelay));
+  await new Promise(r => setTimeout(r, CFG.editor.javaInitDelay));
 
     try {
       await sendJavaRequest("initialize", {
         processId: null,
-        rootUri: config.workspace.rootUri,
-        workspaceFolders: [{ uri: config.workspace.rootUri, name: "workspace" }],
+        rootUri: CFG.workspace.rootUri,
+        workspaceFolders: [{ uri: CFG.workspace.rootUri, name: "workspace" }],
         capabilities: lspCapabilities()
       });
 
@@ -1670,7 +1656,7 @@ function initJavaLsp() {
 
       await openAllJavaFilesInLsp();
 
-      if (activeFile) {
+            if (activeFile) {
         sendDidOpenForFile(activeFile);
       }
     } catch (e) {
@@ -1678,21 +1664,21 @@ function initJavaLsp() {
       javaInitialized = false;
       if (isJava()) setServerInfo("LSP: jdtls retrying…");
       setTimeout(() => {
-        if (typeof connectJavaLsp === "function") connectJavaLsp(config.server.wsJava);
-      }, config.editor.javaRetryDelay);
+        if (typeof connectJavaLsp === "function") connectJavaLsp(CFG.server.wsJava);
+      }, CFG.editor.javaRetryDelay);
     }
   });
 
   onJavaLspClose(() => {
     javaInitialized = false;
-    openedDocumentUris.clear();
+    openedDocs.clear();
     if (isJava()) setServerInfo("LSP: jdtls disconnected");
 
     setTimeout(() => {
       if (!javaInitialized && typeof connectJavaLsp === "function") {
-        connectJavaLsp(config.server.wsJava);
+        connectJavaLsp(CFG.server.wsJava);
       }
-    }, config.editor.javaRetryDelay);
+    }, CFG.editor.javaRetryDelay);
   });
 
   onJavaLspError(() => {
@@ -1704,6 +1690,7 @@ function initJavaLsp() {
   });
 }
 
+// Odpri VSE .java datoteke v workspace
 async function openAllJavaFilesInLsp() {
   if (!hasServerSupport() || !javaInitialized) return;
 
@@ -1712,7 +1699,7 @@ async function openAllJavaFilesInLsp() {
   for (const filename of javaFiles) {
     const st = fileStates.get(filename);
     if (!st) continue;
-    if (openedDocumentUris.has(st.uri)) continue;
+    if (openedDocs.has(st.uri)) continue;
 
     const text = st.content == null
   ? await loadContentForState(filename, st)
@@ -1720,7 +1707,7 @@ async function openAllJavaFilesInLsp() {
 
 await syncFileToServer(filename, text);
 
-    openedDocumentUris.add(st.uri);
+    openedDocs.add(st.uri);
     sendJavaNotification("textDocument/didOpen", {
       textDocument: { uri: st.uri, languageId: "java", version: st.version, text }
     });
@@ -1762,12 +1749,12 @@ function sendDidOpenForFile(filename) {
 
   const text = filename === activeFile ? editor.getValue() : (st.content || "");
 
-  if (openedDocumentUris.has(st.uri)) {
+        if (openedDocs.has(st.uri)) {
     lspNotification("textDocument/didClose", { textDocument: { uri: st.uri } });
-    openedDocumentUris.delete(st.uri);
+    openedDocs.delete(st.uri);
   }
 
-  openedDocumentUris.add(st.uri);
+  openedDocs.add(st.uri);
   lspNotification("textDocument/didOpen", {
     textDocument: {
       uri:        st.uri,
@@ -1782,8 +1769,8 @@ function sendDidCloseForFile(filename) {
   const st = fileStates.get(filename);
   if (!st) return;
 
-  if (!openedDocumentUris.has(st.uri)) return;
-  openedDocumentUris.delete(st.uri);
+  if (!openedDocs.has(st.uri)) return;
+  openedDocs.delete(st.uri);
 
   if (!lspReady()) return;
   lspNotification("textDocument/didClose", { textDocument: { uri: st.uri } });
@@ -1800,7 +1787,9 @@ function updateServerInfo() {
   else setServerInfo("LSP: —");
 }
 
-// signature help
+//──────────────────────────────────────────────────────────────────────
+// Signature Help
+//──────────────────────────────────────────────────────────────────────
 
 function requestSignatureHelp(triggerChar, isRetrigger) {
   if (!lspReady()) return;
@@ -1859,13 +1848,15 @@ function requestSignatureHelp(triggerChar, isRetrigger) {
     .catch(() => {});
 }
 
-// completion
+//──────────────────────────────────────────────────────────────────────
+// Completion
+//──────────────────────────────────────────────────────────────────────
 
 function requestCompletion(triggerChar = null) {
   if (!lspReady()) return;
 
   const st = docState();
-  const reqSeq = ++completionRequestSequence;
+  const reqSeq = ++completionReqSeq;
   const reqVer = st.version;
   const reqMode = currentMode();
   const reqCur = editor.getCursor();
@@ -1886,7 +1877,7 @@ function requestCompletion(triggerChar = null) {
       : { triggerKind: 1 }
   })
     .then(result => {
-      if (reqSeq !== completionRequestSequence) return;
+      if (reqSeq !== completionReqSeq) return;
       if (reqVer !== docState().version && !isJava()) return;
       if (reqMode !== currentMode()) return;
 
@@ -1899,6 +1890,7 @@ function requestCompletion(triggerChar = null) {
         return;
       }
 
+      // Filtriraj po prefixu
       if (typedPrefix && (!isJava() || isMember)) {
         const lower = typedPrefix.toLowerCase();
         items = items.filter(item =>
@@ -1908,6 +1900,7 @@ function requestCompletion(triggerChar = null) {
         );
       }
 
+      // sortText filter
       if (isClangd()) {
         if (isMember) {
           const m = items.filter(i => (i.sortText || "9") < "4");
@@ -1930,14 +1923,12 @@ function requestCompletion(triggerChar = null) {
 
       items.sort((a, b) => (a.sortText || a.label || "").localeCompare(b.sortText || b.label || ""));
       const max = isMember
-        ? (isJava() ? config.editor.javaMemberMax : config.editor.memberMaxItems)
-        : config.editor.identifierMax;
+        ? (isJava() ? CFG.editor.javaMemberMax : CFG.editor.memberMaxItems)
+        : CFG.editor.identifierMax;
 
       items = items.slice(0, max);
 
       if (editor.state.completionActive) editor.closeHint?.();
-
-      markSmartCodeHintOpened(editor);
 
       CodeMirror.showHint(editor, () => ({
         from,
@@ -1949,23 +1940,24 @@ function requestCompletion(triggerChar = null) {
             : item.label;
           return {
             text: callable ? getFunctionName(item) + "()" : getInsertText(item) || item.label,
+            // render: gradi HTML element z barvanim tipom + bold prefix
             render(el) {
               el.className = "CodeMirror-hint lsp-hint-item";
 
-              const kindIcon = document.createElement("span");
+                            const kindIcon = document.createElement("span");
               kindIcon.className = "lsp-hint-kind";
               const kindInfo = getKindInfo(item.kind);
               kindIcon.textContent = kindInfo.icon;
               kindIcon.style.color = kindInfo.color;
               el.appendChild(kindIcon);
 
-              const labelSpan = document.createElement("span");
+                            const labelSpan = document.createElement("span");
               labelSpan.className = "lsp-hint-label";
 
-              appendLabelWithBoldPrefix(labelSpan, displayLabel, typedPrefix);
+                            appendLabelWithBoldPrefix(labelSpan, displayLabel, typedPrefix);
               el.appendChild(labelSpan);
 
-              if (item.detail) {
+                            if (item.detail) {
                 const detailSpan = document.createElement("span");
                 detailSpan.className = "lsp-hint-detail";
                 detailSpan.textContent = item.detail.split("\n")[0].trim().slice(0, 40);
@@ -1992,14 +1984,15 @@ function requestCompletion(triggerChar = null) {
       }), {
         completeSingle: false,
         alignWithWord: true,
-        closeOnUnfocus: true,
-        extraKeys: smartCodeHintNavigationKeys()
+        closeOnUnfocus: true
       });
     })
     .catch(e => console.error("Completion failed:", e));
 }
 
-// save
+//──────────────────────────────────────────────────────────────────────
+// Save
+//──────────────────────────────────────────────────────────────────────
 
 async function saveFile(filename, silent = false) {
   const norm = normalizePath(filename);
@@ -2014,8 +2007,10 @@ async function saveFile(filename, silent = false) {
 
   st.content = content;
 
+  // 1) Vedno shrani v browser cache
   const cachedOk = persistFileToBrowser(norm, content);
 
+  // 2) Poskusi lokalni write, če obstaja handle
   let wroteLocal = false;
   try {
     wroteLocal = await writeStateToLocal(norm, st, {
@@ -2025,6 +2020,7 @@ async function saveFile(filename, silent = false) {
     console.warn("writeStateToLocal failed:", e.message);
   }
 
+  // 3) Server mirror
   let mirrored = false;
   try {
     mirrored = await mirrorStateToServer(norm);
@@ -2032,6 +2028,7 @@ async function saveFile(filename, silent = false) {
     console.warn("mirrorStateToServer failed:", e.message);
   }
 
+  // 4) LSP save notify samo za trenutno odprto datoteko
   if (norm === activeFile && hasServerSupport() && lspReady()) {
     try {
       lspNotification("textDocument/didSave", {
@@ -2076,7 +2073,9 @@ async function saveActiveFile(silent = false) {
   return saveFile(activeFile, silent);
 }
 
-// diagnostics
+//──────────────────────────────────────────────────────────────────────
+// Diagnostics — per file
+//──────────────────────────────────────────────────────────────────────
 
 function renderDiagnostics(diagnostics, uri) {
   if (!editor) return;
@@ -2109,7 +2108,7 @@ function renderDiagnostics(diagnostics, uri) {
       className: `cm-lsp-${severityClass}`,
       attributes: { title: `${severityToLabel(diag.severity)}: ${diag.message}` }
     });
-    diagnosticMarkers.push(mark);
+    diagnosticMarks.push(mark);
 
     const existing = byLine.get(from.line);
     if (!existing) {
@@ -2129,13 +2128,13 @@ function renderDiagnostics(diagnostics, uri) {
     gutterMarker.textContent = info.severity === 1 ? "●" : info.severity === 2 ? "▲" : "◆";
 
     editor.setGutterMarker(line, "lsp-diagnostics-gutter", gutterMarker);
-    diagnosticMarkers.push({ clear: () => editor.setGutterMarker(line, "lsp-diagnostics-gutter", null) });
+    diagnosticMarks.push({ clear: () => editor.setGutterMarker(line, "lsp-diagnostics-gutter", null) });
 
     editor.addLineClass(line, "background", `cm-diagnostic-line-${severityClass}`);
-    diagnosticMarkers.push({ clear: () => editor.removeLineClass(line, "background", `cm-diagnostic-line-${severityClass}`) });
+    diagnosticMarks.push({ clear: () => editor.removeLineClass(line, "background", `cm-diagnostic-line-${severityClass}`) });
 
     editor.addLineClass(line, "wrap", `cm-diagnostic-linewrap-${severityClass}`);
-    diagnosticMarkers.push({ clear: () => editor.removeLineClass(line, "wrap", `cm-diagnostic-linewrap-${severityClass}`) });
+    diagnosticMarks.push({ clear: () => editor.removeLineClass(line, "wrap", `cm-diagnostic-linewrap-${severityClass}`) });
   }
 
   renderDiagnosticsPanel(activeUri, list);
@@ -2155,6 +2154,7 @@ function renderDiagnosticsPanel(uri, diagnostics) {
 
   listEl.innerHTML = "";
 
+  // Če je diagnostika izklopljena ali napak/opozoril ni, spodnjega območja ne pokažemo.
   if (window.smartCodeShowDiagnostics === false || !items.length) {
     panel.classList.remove("has-problems");
     panel.style.display = "none";
@@ -2192,10 +2192,10 @@ function renderDiagnosticsPanel(uri, diagnostics) {
 }
 
 function clearDiagnostics() {
-  diagnosticMarkers.forEach(m => {
+  diagnosticMarks.forEach(m => {
     try { m.clear(); } catch {}
   });
-  diagnosticMarkers = [];
+  diagnosticMarks = [];
 
   if (editor) editor.clearGutter("lsp-diagnostics-gutter");
 }
@@ -2206,7 +2206,9 @@ function clearDiagnosticsForFile(uri) {
   renderDiagnosticsPanel(uri, []);
 }
 
-// status bar
+//──────────────────────────────────────────────────────────────────────
+// Status bar
+//──────────────────────────────────────────────────────────────────────
 
 function updateCursorInfo() {
   const pos = editor?.getCursor();
@@ -2226,12 +2228,22 @@ function setAutosaveInfo(t, c) {
   el.textContent = t;
   el.className = c;
 }
-// embedded editor mode
+// ═══════════════════════════════════════════════════════════════════════════
+// EMBEDDED MODE (mode 3) — izolirani urejevalniki brez zavihkov in autosave
+//
+// Vsak klic window.createTargetEditor(containerEl, opts) vrne neodvisno
+// instanco CodeMirror z lastnim LSP kontekstom, diagnostikami in API-jem.
+//
+// Opcije:
+//   language        "java" | "c" | "cpp"  (privzeto: "java")
+//   folder          relativna podmapa workspace za LSP kontekst (opcijsko)
+//   showDiagnostics true/false (privzeto: true)
+// ═══════════════════════════════════════════════════════════════════════════
 
-let embeddedEditorIdCounter = 0;
+let _embeddedIdCounter = 0;
 
-// Počaka, da je LSP inicializiran 
-function waitForLspInitialization(isJava) {
+// Počaka, da je LSP inicializiran (initialize/initialized handshake je končan).
+function _waitLspInit(isJava) {
   return new Promise(resolve => {
     const check = () => {
       const ok = isJava ? javaInitialized : clangdInitialized;
@@ -2244,38 +2256,56 @@ function waitForLspInitialization(isJava) {
 
 class EmbeddedEditorInstance {
   constructor(containerEl, opts = {}) {
-    this.id       = embeddedEditorIdCounter++;
+    this.id       = _embeddedIdCounter++;
     this.language = opts.language || "java";
     this.folder   = opts.folder   || null;
-    this.showDiagnostics = opts.showDiagnostics !== false;
-    this.diagnosticMarkers   = [];
-    this.version = 1;
-    this.ready   = false;
-    this.readyCallbacks = [];
-    this.completionSequence  = 0;
-    this.completionTimer = null;
-    this.suppressCompletion = false;
+    this.syncRoot = opts.syncRoot || null;
+    this.savePath = opts.savePath ? normalizePath(opts.savePath) : null;
+    this._showDiagnostics = opts.showDiagnostics !== false;
+    this._marks   = [];
+    this._version = 1;
+    this._ready   = false;
+    this._readyCbs = [];
+    this._compSeq  = 0;
+    this._compTimer = null;
+    this._saveTimer = null;
+    this._suppressCompletion = false;
 
-    const ext = { java: ".java", c: ".c", cpp: ".cpp" };
-    this.virtualFile = `embedded_${this.id}${ext[this.language] || ".java"}`;
-    this.uri = uriForFile(this.virtualFile);
+    this._updateVirtualFile();
 
-    this.buildDom(containerEl);
-    this.initCodeMirror();
-    this.connectLsp();
+    this._buildDom(containerEl);
+    this._initCM();
+    this._connectLsp();
   }
 
-  // DOM
-  buildDom(container) {
-    const wrapper = document.createElement("div");
+  _extensionForLanguage(lang) {
+    return { java: ".java", c: ".c", cpp: ".cpp" }[lang] || ".java";
+  }
+
+  _updateVirtualFile() {
+    if (this.savePath) {
+      this.virtualFile = normalizePath(this.savePath);
+    } else {
+      const ext = this._extensionForLanguage(this.language);
+      const folder = normalizePath(this.folder || this.syncRoot || "").replace(/\/+$/, "");
+      const name = `embedded_${this.id}${ext}`;
+      this.virtualFile = folder ? `${folder}/${name}` : name;
+    }
+
+    this.uri = uriForFile(this.virtualFile);
+  }
+
+  // ── DOM ─────────────────────────────────────────────────────────────
+  _buildDom(container) {
+        const wrapper = document.createElement("div");
     wrapper.className = "editor-wrapper";
     wrapper.style.cssText = "flex:1 1 auto;overflow:hidden;min-height:0;position:relative;";
     const ta = document.createElement("textarea");
     wrapper.appendChild(ta);
     container.appendChild(wrapper);
-    this.textarea = ta;
+    this._ta = ta;
 
-    const panel = document.createElement("section");
+        const panel = document.createElement("section");
     panel.className = "diagnostics-panel";
     panel.style.display = "none";
     panel.innerHTML = `
@@ -2287,44 +2317,48 @@ class EmbeddedEditorInstance {
         <div class="diagnostics-empty">Ni zaznanih napak.</div>
       </div>`;
     container.appendChild(panel);
-    this.diagnosticsPanel = panel;
-    this.diagnosticsList  = panel.querySelector(".embedded-diag-list");
-    this.diagnosticsCount = panel.querySelector(".embedded-diag-count");
+    this._diagPanel = panel;
+    this._diagList  = panel.querySelector(".embedded-diag-list");
+    this._diagCount = panel.querySelector(".embedded-diag-count");
   }
 
-  // CodeMirror
-  modeForLanguage(lang) {
+  // ── CodeMirror ───────────────────────────────────────────────────────
+  _modeStr(lang) {
     return { java: "text/x-java", c: "text/x-csrc", cpp: "text/x-c++src" }[lang] || "text/x-java";
   }
 
-  initCodeMirror() {
-    this.cm = CodeMirror.fromTextArea(this.textarea, {
-      mode:             this.modeForLanguage(this.language),
+  _initCM() {
+    this.cm = CodeMirror.fromTextArea(this._ta, {
+      mode:             this._modeStr(this.language),
       theme:            "eclipse",
       lineNumbers:      true,
       matchBrackets:    true,
       autoCloseBrackets: true,
       indentUnit:       2,
       tabSize:          2,
-      gutters:          this.showDiagnostics
+      gutters:          this._showDiagnostics
                           ? ["CodeMirror-linenumbers", "lsp-diagnostics-gutter"]
                           : ["CodeMirror-linenumbers"],
       extraKeys: {
-        "Ctrl-Space": () => this.requestCompletion(null),
+        "Ctrl-Space": () => this._requestCompletion(null),
         "Ctrl-S":     () => { /* brez autosave v mode 3 */ },
         "Esc":        () => this.cm.closeHint?.()
       }
     });
     this.cm.setSize("100%", "100%");
-    updateEditorLanguageClass(this.modeForLanguage(this.language));
+    updateEditorLanguageClass(this._modeStr(this.language));
 
-    this.cm.on("change", (cm, ch) => {
+        this.cm.on("change", (_cm, ch) => {
       if (ch.origin === "setValue") return;
-      this.notifyLspChange();
+      this._notifyLspChange();
+      if (this.savePath) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = setTimeout(() => this._saveToWorkspace(), CFG.editor.autosaveDelay ?? 1500);
+      }
     });
 
-    this.cm.on("inputRead", (cm, change) => {
-      if (this.suppressCompletion) return;
+    this.cm.on("inputRead", (_cm, change) => {
+      if (this._suppressCompletion) return;
       if (change.origin === "complete" || change.origin === "setValue") return;
 
       const text = (change.text || []).join("\n");
@@ -2333,79 +2367,81 @@ class EmbeddedEditorInstance {
       const cur = this.cm.getCursor();
       const line = this.cm.getLine(cur.line) || "";
 
-      this.notifyLspChange();
+      this._notifyLspChange();
 
       if (ch === ".") {
-        this.scheduleCompletion(".", config.editor.completionDelay); return;
+        this._schedComp(".", CFG.editor.completionDelay); return;
       }
       if (ch === ">" && cur.ch >= 2 && line[cur.ch - 2] === "-") {
-        this.scheduleCompletion(">", config.editor.completionDelay); return;
+        this._schedComp(">", CFG.editor.completionDelay); return;
       }
       if (ch === ":" && cur.ch >= 2 && line[cur.ch - 2] === ":") {
-        this.scheduleCompletion(":", config.editor.completionDelay); return;
+        this._schedComp(":", CFG.editor.completionDelay); return;
       }
+      // Identifier
       if (/^[A-Za-z0-9_$]$/.test(ch)) {
-        this.scheduleCompletion(null, config.editor.identifierDelay);
+        this._schedComp(null, CFG.editor.identifierDelay);
       }
       if (change.origin === "+delete") {
-        const { prefix } = this.typedPrefix();
-        if (prefix.length >= 1) this.scheduleCompletion(null, 100);
+        const { prefix } = this._typedPrefix();
+        if (prefix.length >= 1) this._schedComp(null, 100);
       }
     });
   }
 
-  scheduleCompletion(triggerChar, delay) {
-    clearTimeout(this.completionTimer);
-    this.completionTimer = setTimeout(() => this.requestCompletion(triggerChar), delay);
+  _schedComp(triggerChar, delay) {
+    clearTimeout(this._compTimer);
+    this._compTimer = setTimeout(() => this._requestCompletion(triggerChar), delay);
   }
 
-  isJavaLanguage() { return this.language === "java"; }
+  // ── LSP komunikacija ─────────────────────────────────────────────────
+  _isJava() { return this.language === "java"; }
 
-  sendLspRequestForInstance(method, params) {
+  _lspRequest(method, params) {
     if (!hasServerSupport()) return Promise.reject(new Error("No server"));
-    if (this.isJavaLanguage()) return sendJavaRequest(method, params);
+    if (this._isJava()) return sendJavaRequest(method, params);
     return sendLspRequest(method, params);
   }
 
-  sendLspNotificationForInstance(method, params) {
+  _lspNotify(method, params) {
     if (!hasServerSupport()) return;
-    if (this.isJavaLanguage()) sendJavaNotification(method, params);
+    if (this._isJava()) sendJavaNotification(method, params);
     else               sendLspNotification(method, params);
   }
 
-  isLspReadyForInstance() {
+  _lspReady() {
     if (!hasServerSupport()) return false;
-    if (this.isJavaLanguage()) return javaInitialized  && typeof isJavaLspReady === "function" && isJavaLspReady();
+    if (this._isJava()) return javaInitialized  && typeof isJavaLspReady === "function" && isJavaLspReady();
     return clangdInitialized && typeof isLspReady === "function" && isLspReady();
   }
 
-  languageId() {
+  _langId() {
     return this.language === "java" ? "java" : this.language === "cpp" ? "cpp" : "c";
   }
 
-  openInLsp() {
-    if (!this.isLspReadyForInstance()) return;
-    this.sendLspNotificationForInstance("textDocument/didOpen", {
+  _openInLsp() {
+    if (!this._lspReady()) return;
+    this._lspNotify("textDocument/didOpen", {
       textDocument: {
         uri:        this.uri,
-        languageId: this.languageId(),
-        version:    this.version,
+        languageId: this._langId(),
+        version:    this._version,
         text:       this.cm.getValue()
       }
     });
   }
 
-  notifyLspChange() {
-    if (!this.isLspReadyForInstance()) return;
-    this.version++;
-    this.sendLspNotificationForInstance("textDocument/didChange", {
-      textDocument:   { uri: this.uri, version: this.version },
+  _notifyLspChange() {
+    if (!this._lspReady()) return;
+    this._version++;
+    this._lspNotify("textDocument/didChange", {
+      textDocument:   { uri: this.uri, version: this._version },
       contentChanges: [{ text: this.cm.getValue() }]
     });
   }
 
-  // Completion
-  typedPrefix() {
+  // ── Completion ───────────────────────────────────────────────────────
+  _typedPrefix() {
     const cur  = this.cm.getCursor();
     const line = this.cm.getLine(cur.line) || "";
     let start  = cur.ch;
@@ -2413,38 +2449,37 @@ class EmbeddedEditorInstance {
     return { from: { line: cur.line, ch: start }, to: cur, prefix: line.slice(start, cur.ch) };
   }
 
-  requestCompletion(triggerChar) {
-    if (!this.isLspReadyForInstance()) return;
+  _requestCompletion(triggerChar) {
+    if (!this._lspReady()) return;
 
     const cur        = this.cm.getCursor();
-    const { from, to, prefix } = this.typedPrefix();
+    const { from, to, prefix } = this._typedPrefix();
     const isMember   = [".", ">", ":"].includes(triggerChar);
     const typedPfx   = isMember ? "" : prefix;
-    const seq        = ++this.completionSequence;
+    const seq        = ++this._compSeq;
 
     if (!isMember && typedPfx.length < 1) return;
 
-    this.sendLspRequestForInstance("textDocument/completion", {
+    this._lspRequest("textDocument/completion", {
       textDocument: { uri: this.uri },
       position:     { line: cur.line, character: cur.ch },
       context: triggerChar
         ? { triggerKind: 2, triggerCharacter: triggerChar }
         : { triggerKind: 1 }
     }).then(result => {
-      if (seq !== this.completionSequence) return;
+      if (seq !== this._compSeq) return;
 
       let items = Array.isArray(result) ? result : (result?.items ?? []);
       if (!items.length) return;
 
-      // Filter po prefixu
-      if (typedPfx) {
+            if (typedPfx) {
         const low = typedPfx.toLowerCase();
         items = items.filter(i =>
           (i.label || "").toLowerCase().startsWith(low) ||
           stripSnippets(i.insertText || "").toLowerCase().startsWith(low)
         );
       }
-      if (!this.isJavaLanguage()) {
+            if (!this._isJava()) {
         items = isMember
           ? items.filter(i => (i.sortText || "9") < "4") || items
           : items.filter(i => (i.sortText || "9") < "7");
@@ -2456,12 +2491,10 @@ class EmbeddedEditorInstance {
       if (!items.length) return;
       items.sort((a, b) => (a.sortText || a.label || "").localeCompare(b.sortText || b.label || ""));
       items = items.slice(0, isMember
-        ? (this.isJavaLanguage() ? config.editor.javaMemberMax : config.editor.memberMaxItems)
-        : config.editor.identifierMax);
+        ? (this._isJava() ? CFG.editor.javaMemberMax : CFG.editor.memberMaxItems)
+        : CFG.editor.identifierMax);
 
       if (this.cm.state.completionActive) this.cm.closeHint?.();
-
-      markSmartCodeHintOpened(this.cm);
 
       const self = this;
       CodeMirror.showHint(this.cm, () => ({
@@ -2489,7 +2522,7 @@ class EmbeddedEditorInstance {
               }
             },
             hint(cm) {
-              self.suppressCompletion = true;
+              self._suppressCompletion = true;
               try {
                 if (callable) {
                   cm.replaceRange(getFunctionName(item) + "()", from, to, "complete");
@@ -2499,7 +2532,7 @@ class EmbeddedEditorInstance {
                   cm.replaceRange(getInsertText(item) || item.label, from, to, "complete");
                 }
               } finally {
-                setTimeout(() => { self.suppressCompletion = false; }, 0);
+                setTimeout(() => { self._suppressCompletion = false; }, 0);
               }
             }
           };
@@ -2507,36 +2540,35 @@ class EmbeddedEditorInstance {
       }), {
         completeSingle: false,
         alignWithWord: true,
-        closeOnUnfocus: true,
-        extraKeys: smartCodeHintNavigationKeys()
+        closeOnUnfocus: true
       });
     }).catch(() => {});
   }
 
-  // Diagnostike 
-  clearDiagnosticMarkers() {
-    this.diagnosticMarkers.forEach(m => { try { m.clear(); } catch {} });
-    this.diagnosticMarkers = [];
+  // ── Diagnostike ──────────────────────────────────────────────────────
+  _clearDiagMarks() {
+    this._marks.forEach(m => { try { m.clear(); } catch {} });
+    this._marks = [];
     this.cm.clearGutter("lsp-diagnostics-gutter");
   }
 
-  renderDiagnosticsForInstance(diagnostics) {
-    this.clearDiagnosticMarkers();
+  _renderDiagnostics(diagnostics) {
+    this._clearDiagMarks();
     const items   = diagnostics || [];
     const errors  = items.filter(d => d.severity === 1).length;
     const warns   = items.filter(d => d.severity === 2).length;
 
-    if (this.diagnosticsCount) this.diagnosticsCount.textContent = `${errors} errors, ${warns} warnings`;
+    if (this._diagCount) this._diagCount.textContent = `${errors} errors, ${warns} warnings`;
 
-    if (!this.showDiagnostics || !items.length) {
-      this.diagnosticsPanel.classList.remove("has-problems");
-      this.diagnosticsPanel.style.display = "none";
-      if (this.diagnosticsList) this.diagnosticsList.innerHTML = "<div class='diagnostics-empty'>Ni zaznanih napak.</div>";
+    if (!this._showDiagnostics || !items.length) {
+      this._diagPanel.classList.remove("has-problems");
+      this._diagPanel.style.display = "none";
+      if (this._diagList) this._diagList.innerHTML = "<div class='diagnostics-empty'>Ni zaznanih napak.</div>";
       return;
     }
 
-    this.diagnosticsPanel.style.display = "";
-    this.diagnosticsPanel.classList.add("has-problems");
+    this._diagPanel.style.display = "";
+    this._diagPanel.classList.add("has-problems");
 
     const byLine = new Map();
     items.forEach(diag => {
@@ -2552,7 +2584,7 @@ class EmbeddedEditorInstance {
         className:  `cm-lsp-${sc}`,
         attributes: { title: `${severityToLabel(diag.severity)}: ${diag.message}` }
       });
-      this.diagnosticMarkers.push(mark);
+      this._marks.push(mark);
 
       const ex = byLine.get(from.line);
       if (!ex) byLine.set(from.line, { severity: diag.severity, diagnostics: [diag] });
@@ -2566,13 +2598,13 @@ class EmbeddedEditorInstance {
       gm.title = info.diagnostics.map(d => `${severityToLabel(d.severity)}: ${d.message}`).join("\n");
       gm.textContent = info.severity === 1 ? "●" : info.severity === 2 ? "▲" : "◆";
       this.cm.setGutterMarker(line, "lsp-diagnostics-gutter", gm);
-      this.diagnosticMarkers.push({ clear: () => this.cm.setGutterMarker(line, "lsp-diagnostics-gutter", null) });
+      this._marks.push({ clear: () => this.cm.setGutterMarker(line, "lsp-diagnostics-gutter", null) });
       this.cm.addLineClass(line, "background", `cm-diagnostic-line-${sc}`);
-      this.diagnosticMarkers.push({ clear: () => this.cm.removeLineClass(line, "background", `cm-diagnostic-line-${sc}`) });
+      this._marks.push({ clear: () => this.cm.removeLineClass(line, "background", `cm-diagnostic-line-${sc}`) });
     }
 
-    if (this.diagnosticsList) {
-      this.diagnosticsList.innerHTML = "";
+    if (this._diagList) {
+      this._diagList.innerHTML = "";
       items.forEach(diag => {
         const row  = document.createElement("button");
         row.type   = "button";
@@ -2588,91 +2620,111 @@ class EmbeddedEditorInstance {
         row.addEventListener("click", () => {
           this.cm.focus(); this.cm.setCursor({ line, ch }); this.cm.scrollIntoView({ line, ch }, 120);
         });
-        this.diagnosticsList.appendChild(row);
+        this._diagList.appendChild(row);
       });
     }
   }
 
-  connectLsp() {
-    const onDiag = this.isJavaLanguage() ? onJavaLspDiagnostics : onLspDiagnostics;
+  // ── LSP connect + folder context ────────────────────────────────────
+  _connectLsp() {
+        const onDiag = this._isJava() ? onJavaLspDiagnostics : onLspDiagnostics;
     onDiag(params => {
-      if (params?.uri === this.uri) this.renderDiagnosticsForInstance(params.diagnostics || []);
+      if (params?.uri === this.uri) this._renderDiagnostics(params.diagnostics || []);
     });
 
     const activate = async () => {
-      // Počakamo, da je LSP fully initialized (ne samo connected)
-      await waitForLspInitialization(this.isJavaLanguage());
-      this.openInLsp();
-      if (this.folder) await this.openFolderContext();
-      if (!this.ready) {
-        this.ready = true;
-        this.readyCallbacks.forEach(fn => fn(this));
-        this.readyCallbacks = [];
+            await _waitLspInit(this._isJava());
+      this._openInLsp();
+      if (this.folder) await this._openFolderContext();
+      if (!this._ready) {
+        this._ready = true;
+        this._readyCbs.forEach(fn => fn(this));
+        this._readyCbs = [];
       }
     };
 
-    if (this.isLspReadyForInstance()) { activate(); }
+        if (this._lspReady()) { activate(); }
 
-    const onOpen = this.isJavaLanguage() ? onJavaLspOpen : onLspOpen;
+        const onOpen = this._isJava() ? onJavaLspOpen : onLspOpen;
     onOpen(() => activate());
   }
 
-  async openFolderContext() {
+  // Odpre vse kontekstualne datoteke iz podane mape v LSP
+  async _openFolderContext() {
     if (!hasServerSupport() || !this.folder) return;
     try {
-      const url = `${config.server.httpUrl}/scan?folder=${encodeURIComponent(this.folder)}`;
+      const url = `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(this.folder)}`;
       const res = await fetch(url);
       if (!res.ok) return;
       const { files } = await res.json();
 
-      const isJavaSelf = this.isJavaLanguage();
+      const isJavaSelf = this._isJava();
       const exts = isJavaSelf ? [".java"] : [".c", ".cpp", ".cc", ".cxx", ".h", ".hpp"];
 
       for (const f of files) {
         const lf = f.toLowerCase();
         if (!exts.some(e => lf.endsWith(e))) continue;
-        if (f === this.virtualFile) continue;
+                if (f === this.virtualFile) continue;
 
         try {
-          const fRes = await fetch(`${config.server.httpUrl}/workspace/${encodeURIComponent(f)}`);
+          const fRes = await fetch(`${CFG.server.httpUrl}/workspace/${encodeURIComponent(f)}`);
           if (!fRes.ok) continue;
           const text    = await fRes.text();
           const langId  = lf.endsWith(".java") ? "java" : lf.endsWith(".cpp") || lf.endsWith(".cc") || lf.endsWith(".cxx") ? "cpp" : "c";
           const fUri    = uriForFile(f);
 
-          this.sendLspNotificationForInstance("textDocument/didOpen", {
+          this._lspNotify("textDocument/didOpen", {
             textDocument: { uri: fUri, languageId: langId, version: 1, text }
           });
         } catch {}
       }
     } catch (e) {
-      console.warn("[EmbeddedEditor] folder context failed:", e.message);
+      console.warn("[EmbeddedMode] folder context failed:", e.message);
     }
   }
 
+  // ── Javni API ────────────────────────────────────────────────────────
   setContent(code, language) {
-    if (language && language !== this.language) {
-      const ext = { java: ".java", c: ".c", cpp: ".cpp" };
-      this.language    = language;
-      this.virtualFile = `embedded_${this.id}${ext[language] || ".java"}`;
-      this.uri         = uriForFile(this.virtualFile);
-      const mode = this.modeForLanguage(language);
+        if (language && language !== this.language) {
+      this.language = language;
+      this._updateVirtualFile();
+      const mode = this._modeStr(language);
       this.cm.setOption("mode", mode);
       updateEditorLanguageClass(mode);
     }
 
-    this.version++;
+    this._version++;
     this.cm.setValue(code ?? "");
 
-    if (this.isLspReadyForInstance()) {
-      this.sendLspNotificationForInstance("textDocument/didOpen", {
+    if (this._lspReady()) {
+      this._lspNotify("textDocument/didOpen", {
         textDocument: {
           uri:        this.uri,
-          languageId: this.languageId(),
-          version:    this.version,
+          languageId: this._langId(),
+          version:    this._version,
           text:       code ?? ""
         }
       });
+    }
+
+    // Sinhroniziraj začetno vsebino v workspace in target-root
+    if (hasServerSupport()) {
+      clearTimeout(this._saveTimer);
+      this._saveTimer = setTimeout(() => this._saveToWorkspace(), 300);
+    }
+  }
+
+  async _saveToWorkspace() {
+    if (!hasServerSupport()) return;
+    const content = this.cm.getValue();
+
+    try {
+      await fetch(
+        `${CFG.server.httpUrl}/workspace/${escapePathSegment(this.virtualFile)}`,
+        { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: content }
+      );
+    } catch (e) {
+      console.warn(`[embedded] workspace save failed: ${e.message}`);
     }
   }
 
@@ -2683,16 +2735,16 @@ class EmbeddedEditorInstance {
   }
 
   setDiagnosticsVisible(val) {
-    this.showDiagnostics = val !== false;
+    this._showDiagnostics = val !== false;
     this.cm.setOption("gutters",
-      this.showDiagnostics
+      this._showDiagnostics
         ? ["CodeMirror-linenumbers", "lsp-diagnostics-gutter"]
         : ["CodeMirror-linenumbers"]
     );
-    if (!this.showDiagnostics) {
-      this.clearDiagnosticMarkers();
-      this.diagnosticsPanel.classList.remove("has-problems");
-      this.diagnosticsPanel.style.display = "none";
+    if (!this._showDiagnostics) {
+      this._clearDiagMarks();
+      this._diagPanel.classList.remove("has-problems");
+      this._diagPanel.style.display = "none";
     }
   }
 
@@ -2702,20 +2754,21 @@ class EmbeddedEditorInstance {
 
   whenReady() {
     return new Promise(resolve => {
-      if (this.ready) resolve(this);
-      else this.readyCallbacks.push(resolve);
+      if (this._ready) resolve(this);
+      else this._readyCbs.push(resolve);
     });
   }
 
   destroy() {
-    if (this.isLspReadyForInstance()) {
-      this.sendLspNotificationForInstance("textDocument/didClose", { textDocument: { uri: this.uri } });
+        if (this._lspReady()) {
+      this._lspNotify("textDocument/didClose", { textDocument: { uri: this.uri } });
     }
-    this.clearDiagnosticMarkers();
+    this._clearDiagMarks();
     this.cm.toTextArea();
   }
 }
 
-window.createEmbeddedEditor = function(containerEl, opts = {}) {
+// ── Globalni factory ─────────────────────────────────────────────────────
+window.createTargetEditor = function(containerEl, opts = {}) {
   return new EmbeddedEditorInstance(containerEl, opts);
 };

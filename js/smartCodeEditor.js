@@ -1,11 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════
 // smartCodeEditor.js  — vrstni red: config.js → lspClient.js → smartCodeEditor.js → editorMain.js
 //
-// MODE 1/2  (projekt / mapa):
-//   var ed = smartCodeEditor.initEditor("editorDiv", true, true, true, 1);
+// MODE PROJECT  (večdatotečni urejevalnik s projekti in zavihki):
+//   var ed = smartCodeEditor.initEditor("editorDiv", true, true, true, smartCodeEditor.editorMode.PROJECT);
 //
-// MODE 3  (vgrajen enodatotečni urejevalnik, brez zavihkov, brez autosave):
-//   var ed = smartCodeEditor.initEditor("div", false, false, true, 3, {
+// MODE FOLDER  (odpre direktorij kot projekt):
+//   var ed = smartCodeEditor.initEditor("editorDiv", true, true, true, smartCodeEditor.editorMode.FOLDER);
+//
+// MODE SINGLE  (vgrajen enodatotečni urejevalnik, brez zavihkov, brez autosave):
+//   var ed = smartCodeEditor.initEditor("div", false, false, true, smartCodeEditor.editorMode.SINGLE, {
 //     language: "java",   // "java" | "c" | "cpp"
 //     folder:   "mylib"   // relativna podmapa workspace za LSP kontekst (opcijsko)
 //   });
@@ -16,6 +19,19 @@
 // ═══════════════════════════════════════════════════════════════════════
 
 window.smartCodeEditor = (() => {
+
+  const editorMode = Object.freeze({
+    PROJECT: "project",   // Večdatotečni urejevalnik s projekti in zavihki
+    FOLDER:  "folder",    // Odpre direktorij kot projekt
+    SINGLE:  "single"     // Izoliran urejevalnik brez zavihkov (ciljne)
+  });
+
+  const _modeMap = { project: 1, folder: 2, single: 3 };
+
+  function resolveMode(m) {
+    if (typeof m === "string") return _modeMap[m.toLowerCase()] ?? 1;
+    return Number(m) || 1;
+  }
 
   const callbacks = { onChange: null, onSave: null, onFileOpen: null };
   let editorMainPatched = false;
@@ -93,33 +109,40 @@ window.smartCodeEditor = (() => {
       showToolbar = true,
       showTabStatusbar = true,
       showDiagnostics = true,
-      editorMode = 1,
+      mode = editorMode.PROJECT,
       options = {}
     ) {
-      if (typeof editorMode === "object" && editorMode !== null) {
-        options = editorMode;
-        editorMode = options.mode ?? 1;
+      if (typeof mode === "object" && mode !== null) {
+        options = mode;
+        mode = options.mode ?? editorMode.PROJECT;
       }
 
-      this.divId = divId;
-      this.showToolbar = showToolbar !== false;
+      this.divId            = divId;
+      this.showToolbar      = showToolbar !== false;
       this.showTabStatusbar = showTabStatusbar !== false;
-      this.showDiagnostics = showDiagnostics !== false;
-      this.mode = Number(editorMode) || 1;
-      this.options = options || {};
-      this.readyState = false;
+      this.showDiagnostics  = showDiagnostics !== false;
+      this.mode             = resolveMode(mode);
+      this.options          = options || {};
+      this.syncRoot         = Object.prototype.hasOwnProperty.call(this.options, "syncRoot")
+        ? (this.options.syncRoot || "")
+        : (this.options.folder || "");
+      this.lsyncEnabled     = this.options.lsyncEnabled === true;
+      this.options.syncRoot = this.syncRoot;
+      this.options.lsyncEnabled = this.lsyncEnabled;
+      this.readyState       = false;
       this.embeddedEditorInstance = null;
 
       if (this.mode === 3) {
-        window.smartCodeInitialMode = 3;
+        window.smartCodeInitialMode     = 3;
         window.smartCodeShowDiagnostics = this.showDiagnostics;
+        window.smartCodeInitialOptions  = this.options;
         this.initEmbeddedEditorMode();
         return;
       }
 
       window.smartCodeShowDiagnostics = this.showDiagnostics;
-      window.smartCodeInitialMode = this.mode;
-      window.smartCodeInitialOptions = this.options;
+      window.smartCodeInitialMode     = this.mode;
+      window.smartCodeInitialOptions  = this.options;
 
       this.prepareDom();
 
@@ -159,17 +182,18 @@ window.smartCodeEditor = (() => {
         const root = this.root();
         if (!root) return;
 
-        root.style.display = "flex";
+        root.style.display       = "flex";
         root.style.flexDirection = "column";
-        root.style.overflow = "hidden";
+        root.style.overflow      = "hidden";
 
-        if (!root.style.height) {
-          root.style.height = "100%";
-        }
+        if (!root.style.height) root.style.height = "100%";
 
         this.embeddedEditorInstance = window.createEmbeddedEditor(root, {
-          language: this.options.language || "java",
-          folder: this.options.folder || null,
+          language:        this.options.language || "java",
+          folder:          this.options.folder   || this.options.project || null,
+          syncRoot:        this.syncRoot,
+          lsyncEnabled:    this.lsyncEnabled,
+          savePath:        this.options.savePath || null,
           showDiagnostics: this.showDiagnostics
         });
 
@@ -181,8 +205,7 @@ window.smartCodeEditor = (() => {
             this.pendingContent ?? "",
             this.pendingLanguage
           );
-
-          this.pendingContent = undefined;
+          this.pendingContent  = undefined;
           this.pendingLanguage = undefined;
         }
       };
@@ -196,29 +219,18 @@ window.smartCodeEditor = (() => {
 
     root() {
       const root = document.getElementById(this.divId);
-
-      if (!root) {
-        console.error(`[smartCodeEditor] element #${this.divId} ne obstaja`);
-      }
-
+      if (!root) console.error(`[smartCodeEditor] element #${this.divId} ne obstaja`);
       return root;
     }
 
     prepareRoot(root) {
       root.classList.add("smartcode-root");
-
-      if (!root.style.width) {
-        root.style.width = "100%";
-      }
-
-      if (!root.style.height) {
-        root.style.height = "100vh";
-      }
-
-      root.style.display = "flex";
+      if (!root.style.width)  root.style.width  = "100%";
+      if (!root.style.height) root.style.height = "100vh";
+      root.style.display       = "flex";
       root.style.flexDirection = "column";
-      root.style.overflow = "hidden";
-      root.style.minHeight = "0";
+      root.style.overflow      = "hidden";
+      root.style.minHeight     = "0";
     }
 
     createDom(root) {
@@ -279,9 +291,7 @@ window.smartCodeEditor = (() => {
         this.createDom(root);
       } else {
         for (const el of this.existingEditorElements()) {
-          if (el.parentElement !== root) {
-            root.appendChild(el);
-          }
+          if (el.parentElement !== root) root.appendChild(el);
         }
       }
 
@@ -301,10 +311,7 @@ window.smartCodeEditor = (() => {
 
     showDirectoryPrompt() {
       const root = this.root();
-
-      if (!root || document.getElementById("smartcodeDirectoryPrompt")) {
-        return;
-      }
+      if (!root || document.getElementById("smartcodeDirectoryPrompt")) return;
 
       const box = document.createElement("div");
       box.id = "smartcodeDirectoryPrompt";
@@ -320,9 +327,7 @@ window.smartCodeEditor = (() => {
       `;
 
       const oldPosition = root.style.position;
-      if (!oldPosition || oldPosition === "static") {
-        root.style.position = "relative";
-      }
+      if (!oldPosition || oldPosition === "static") root.style.position = "relative";
 
       root.appendChild(box);
 
@@ -337,28 +342,19 @@ window.smartCodeEditor = (() => {
     }
 
     applyVisibility() {
-      const toolbar = document.querySelector("header.topbar, .topbar");
-      const tabbar = document.getElementById("tabBar");
-      const status = document.querySelector("footer.statusbar, .statusbar");
+      const toolbar          = document.querySelector("header.topbar, .topbar");
+      const tabbar           = document.getElementById("tabBar");
+      const status           = document.querySelector("footer.statusbar, .statusbar");
       const diagnosticsPanel = document.getElementById("diagnosticsPanel");
 
-      if (toolbar) {
-        toolbar.style.display = this.showToolbar ? "" : "none";
-      }
-
-      if (tabbar) {
-        tabbar.style.display = this.showTabStatusbar ? "" : "none";
-      }
-
-      if (status) {
-        status.style.display = this.showTabStatusbar ? "" : "none";
-      }
+      if (toolbar)          toolbar.style.display = this.showToolbar      ? "" : "none";
+      if (tabbar)           tabbar.style.display  = this.showTabStatusbar ? "" : "none";
+      if (status)           status.style.display  = this.showTabStatusbar ? "" : "none";
 
       if (diagnosticsPanel) {
         diagnosticsPanel.style.display =
           this.showDiagnostics && diagnosticsPanel.classList.contains("has-problems")
-            ? ""
-            : "none";
+            ? "" : "none";
       }
 
       window.smartCodeShowDiagnostics = this.showDiagnostics;
@@ -371,21 +367,16 @@ window.smartCodeEditor = (() => {
             : ["CodeMirror-linenumbers"]
         );
 
-        if (!this.showDiagnostics && typeof clearDiagnostics === "function") {
-          clearDiagnostics();
-        }
+        if (!this.showDiagnostics && typeof clearDiagnostics === "function") clearDiagnostics();
 
         if (this.showDiagnostics && typeof renderDiagnostics === "function") {
           const uri =
-            typeof activeFile !== "undefined" &&
-            typeof fileStates !== "undefined"
-              ? fileStates.get(activeFile)?.uri
-              : null;
+            typeof activeFile !== "undefined" && typeof fileStates !== "undefined"
+              ? fileStates.get(activeFile)?.uri : null;
 
           const list =
             uri && typeof diagnosticsByFile !== "undefined"
-              ? diagnosticsByFile.get(uri) || []
-              : [];
+              ? diagnosticsByFile.get(uri) || [] : [];
 
           renderDiagnostics(list, uri);
         }
@@ -394,250 +385,166 @@ window.smartCodeEditor = (() => {
       }
     }
 
+    // ── Javni API ────────────────────────────────────────────────────────
+
     async openProject(project) {
-      if (this.mode === 3) {
-        console.warn("[smartCodeEditor] openProject ni na voljo v mode 3");
-        return;
-      }
-
-      if (typeof window.openSmartCodeProject !== "function") {
-        console.warn("[smartCodeEditor] openSmartCodeProject še ni pripravljen");
-        return;
-      }
-
+      if (this.mode === 3) { console.warn("[smartCodeEditor] openProject ni na voljo v SINGLE načinu"); return; }
+      if (typeof window.openSmartCodeProject !== "function") { console.warn("[smartCodeEditor] openSmartCodeProject še ni pripravljen"); return; }
       await window.openSmartCodeProject(project);
     }
 
     async openDemoProject() {
-      if (this.mode !== 3) {
-        document.getElementById("demoProjectBtn")?.click();
-      }
+      if (this.mode !== 3) document.getElementById("demoProjectBtn")?.click();
     }
 
     async openDirectoryProject() {
       if (this.mode === 3) return;
-
-      if (typeof window.openSmartCodeFolderProject === "function") {
-        await window.openSmartCodeFolderProject();
-        return;
-      }
-
+      if (typeof window.openSmartCodeFolderProject === "function") { await window.openSmartCodeFolderProject(); return; }
       document.getElementById("openFolderBtn")?.click();
     }
 
     async openWorkspaceProject() {
       if (this.mode === 3) return;
-
-      if (typeof window.openSmartCodeWorkspaceProject === "function") {
-        await window.openSmartCodeWorkspaceProject();
-        return;
-      }
-
+      if (typeof window.openSmartCodeWorkspaceProject === "function") { await window.openSmartCodeWorkspaceProject(); return; }
       console.warn("[smartCodeEditor] openSmartCodeWorkspaceProject še ni pripravljen");
     }
 
     getProjectInfo() {
       if (this.mode === 3) return null;
+      return typeof window.getSmartCodeProjectInfo === "function" ? window.getSmartCodeProjectInfo() : null;
+    }
 
-      return typeof window.getSmartCodeProjectInfo === "function"
-        ? window.getSmartCodeProjectInfo()
-        : null;
+    async setSyncRoot(syncRoot = "", lsyncEnabled = this.lsyncEnabled) {
+      const root = String(syncRoot || "")
+        .replace(/\\/g, "/")
+        .replace(/^\/+/, "")
+        .replace(/\/+$/, "");
+
+      this.syncRoot = root;
+      this.lsyncEnabled = lsyncEnabled === true;
+      this.options.syncRoot = this.syncRoot;
+      this.options.lsyncEnabled = this.lsyncEnabled;
+
+      try {
+        const baseUrl =
+          typeof SmartCodeConfig !== "undefined" && SmartCodeConfig.server?.httpUrl
+            ? SmartCodeConfig.server.httpUrl
+            : "http://localhost:3000";
+
+        const res = await fetch(`${baseUrl}/sync-root`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            syncRoot: this.syncRoot,
+            lsyncEnabled: this.lsyncEnabled
+          })
+        });
+
+        return res.ok;
+      } catch (e) {
+        console.warn("[smartCodeEditor] setSyncRoot failed:", e.message);
+        return false;
+      }
+    }
+
+    async setLsyncEnabled(enabled) {
+      return await this.setSyncRoot(this.syncRoot || "", enabled === true);
+    }
+
+    getSyncOptions() {
+      return {
+        syncRoot: this.syncRoot || "",
+        lsyncEnabled: this.lsyncEnabled === true
+      };
     }
 
     setContent(code, language) {
       if (this.mode === 3) {
         if (!this.embeddedEditorInstance) {
-          this.pendingContent = code;
+          this.pendingContent  = code;
           this.pendingLanguage = language;
           return;
         }
-
         this.embeddedEditorInstance.setContent(code, language);
         return;
       }
 
-      if (typeof editor === "undefined" || !editor) {
-        console.warn("[smartCodeEditor] editor še ni pripravljen");
-        return;
-      }
+      if (typeof editor === "undefined" || !editor) { console.warn("[smartCodeEditor] editor še ni pripravljen"); return; }
 
       if (language) {
         const project = {
-          id: `external-${Date.now()}`,
-          name: "External content",
-          source: "api",
-          persist: false,
-          files: [
-            {
-              path: language,
-              content: code ?? ""
-            }
-          ],
+          id: `external-${Date.now()}`, name: "External content",
+          source: "api", persist: false,
+          files: [{ path: language, content: code ?? "" }],
           activeFile: language
         };
-
-        if (typeof window.openSmartCodeProject === "function") {
-          window.openSmartCodeProject(project);
-        }
-
+        if (typeof window.openSmartCodeProject === "function") window.openSmartCodeProject(project);
         return;
       }
 
       const prev = typeof isFileSwitch !== "undefined" ? isFileSwitch : false;
-
-      try {
-        if (typeof isFileSwitch !== "undefined") {
-          isFileSwitch = true;
-        }
-      } catch {}
-
+      try { if (typeof isFileSwitch !== "undefined") isFileSwitch = true; } catch {}
       editor.setValue(code ?? "");
-
-      try {
-        if (typeof isFileSwitch !== "undefined") {
-          isFileSwitch = prev;
-        }
-      } catch {}
+      try { if (typeof isFileSwitch !== "undefined") isFileSwitch = prev; } catch {}
     }
 
     getContent() {
-      if (this.mode === 3) {
-        return this.embeddedEditorInstance ? this.embeddedEditorInstance.getContent() : "";
-      }
-
-      if (typeof editor === "undefined" || !editor) {
-        return "";
-      }
-
+      if (this.mode === 3) return this.embeddedEditorInstance ? this.embeddedEditorInstance.getContent() : "";
+      if (typeof editor === "undefined" || !editor) return "";
       return editor.getValue();
     }
 
     setLanguage(lang) {
-      if (this.mode === 3) {
-        this.embeddedEditorInstance?.setLanguage(lang);
-        return;
-      }
-
+      if (this.mode === 3) { this.embeddedEditorInstance?.setLanguage(lang); return; }
       if (typeof editor === "undefined" || !editor) return;
 
-      const modes = {
-        java: "text/x-java",
-        c: "text/x-csrc",
-        cpp: "text/x-c++src",
-        "c++": "text/x-c++src"
-      };
-
-      const mode = modes[lang];
-
-      if (!mode) {
-        console.warn(`[smartCodeEditor] neznan jezik: ${lang}`);
-        return;
-      }
+      const modes = { java: "text/x-java", c: "text/x-csrc", cpp: "text/x-c++src", "c++": "text/x-c++src" };
+      const mode  = modes[lang];
+      if (!mode) { console.warn(`[smartCodeEditor] neznan jezik: ${lang}`); return; }
 
       editor.setOption("mode", mode);
       editor.setOption("theme", "eclipse");
-
-      if (typeof updateEditorLanguageClass === "function") {
-        updateEditorLanguageClass(mode);
-      }
-
+      if (typeof updateEditorLanguageClass === "function") updateEditorLanguageClass(mode);
       editor.refresh();
     }
 
     getLanguage() {
-      if (this.mode === 3) {
-        return this.embeddedEditorInstance ? this.embeddedEditorInstance.language : "java";
-      }
-
-      if (typeof editor === "undefined" || !editor) {
-        return "plain";
-      }
-
-      return ({
-        "text/x-java": "java",
-        "text/x-csrc": "c",
-        "text/x-c++src": "cpp"
-      })[editor.getOption("mode")] || "plain";
+      if (this.mode === 3) return this.embeddedEditorInstance ? this.embeddedEditorInstance.language : "java";
+      if (typeof editor === "undefined" || !editor) return "plain";
+      return ({ "text/x-java": "java", "text/x-csrc": "c", "text/x-c++src": "cpp" })[editor.getOption("mode")] || "plain";
     }
 
     async openFile(filename) {
-      if (this.mode !== 3 && typeof openFile === "function") {
-        await openFile(filename);
-      }
+      if (this.mode !== 3 && typeof openFile === "function") await openFile(filename);
     }
 
     async save() {
-      if (this.mode !== 3 && typeof saveActiveFile === "function") {
-        await saveActiveFile(false);
-      }
+      if (this.mode !== 3 && typeof saveActiveFile === "function") await saveActiveFile(false);
     }
 
     setReadOnly(val) {
-      if (this.mode === 3) {
-        this.embeddedEditorInstance?.setReadOnly(val);
-        return;
-      }
-
-      if (typeof editor !== "undefined" && editor) {
-        editor.setOption("readOnly", !!val);
-      }
+      if (this.mode === 3) { this.embeddedEditorInstance?.setReadOnly(val); return; }
+      if (typeof editor !== "undefined" && editor) editor.setOption("readOnly", !!val);
     }
 
     focus() {
-      if (this.mode === 3) {
-        this.embeddedEditorInstance?.focus();
-        return;
-      }
-
-      if (typeof editor !== "undefined" && editor) {
-        editor.focus();
-      }
+      if (this.mode === 3) { this.embeddedEditorInstance?.focus(); return; }
+      if (typeof editor !== "undefined" && editor) editor.focus();
     }
 
     setDiagnosticsVisible(v) {
       this.showDiagnostics = v !== false;
-
-      if (this.mode === 3) {
-        this.embeddedEditorInstance?.setDiagnosticsVisible(v);
-        return;
-      }
-
+      if (this.mode === 3) { this.embeddedEditorInstance?.setDiagnosticsVisible(v); return; }
       this.applyVisibility();
     }
 
-    setUIVisible(v) {
-      if (this.mode !== 3) {
-        this.showToolbar = v !== false;
-        this.showTabStatusbar = v !== false;
-        this.applyVisibility();
-      }
-    }
+    setUIVisible(v)           { if (this.mode !== 3) { this.showToolbar = this.showTabStatusbar = v !== false; this.applyVisibility(); } }
+    setToolbarVisible(v)      { if (this.mode !== 3) { this.showToolbar = v !== false; this.applyVisibility(); } }
+    setTabStatusbarVisible(v) { if (this.mode !== 3) { this.showTabStatusbar = v !== false; this.applyVisibility(); } }
 
-    setToolbarVisible(v) {
-      if (this.mode !== 3) {
-        this.showToolbar = v !== false;
-        this.applyVisibility();
-      }
-    }
-
-    setTabStatusbarVisible(v) {
-      if (this.mode !== 3) {
-        this.showTabStatusbar = v !== false;
-        this.applyVisibility();
-      }
-    }
-
-    onChange(fn) {
-      callbacks.onChange = typeof fn === "function" ? fn : null;
-    }
-
-    onSave(fn) {
-      callbacks.onSave = typeof fn === "function" ? fn : null;
-    }
-
-    onFileOpen(fn) {
-      callbacks.onFileOpen = typeof fn === "function" ? fn : null;
-    }
+    onChange(fn)   { callbacks.onChange  = typeof fn === "function" ? fn : null; }
+    onSave(fn)     { callbacks.onSave    = typeof fn === "function" ? fn : null; }
+    onFileOpen(fn) { callbacks.onFileOpen = typeof fn === "function" ? fn : null; }
 
     get cm() {
       return this.mode === 3
@@ -646,57 +553,49 @@ window.smartCodeEditor = (() => {
     }
 
     get activeFile() {
-      return this.mode === 3
-        ? null
-        : (typeof activeFile !== "undefined" ? activeFile : null);
+      return this.mode === 3 ? null : (typeof activeFile !== "undefined" ? activeFile : null);
     }
 
-    get ready() {
-      return this.readyState;
-    }
+    get ready() { return this.readyState; }
 
     whenReady() {
       return new Promise(resolve => {
-        const check = () => {
-          if (this.readyState) {
-            resolve(this);
-          } else {
-            setTimeout(check, 50);
-          }
-        };
-
+        const check = () => this.readyState ? resolve(this) : setTimeout(check, 50);
         check();
       });
     }
 
     destroy() {
-      callbacks.onChange = null;
-      callbacks.onSave = null;
-      callbacks.onFileOpen = null;
-
-      if (this.mode === 3) {
-        this.embeddedEditorInstance?.destroy();
-      }
+      callbacks.onChange = callbacks.onSave = callbacks.onFileOpen = null;
+      if (this.mode === 3) this.embeddedEditorInstance?.destroy();
     }
   }
 
   return {
+    editorMode,
+
+    // Vrne seznam projektov iz ciljne mape za sinhronizacijo
+    async getProjects() {
+      try {
+        const url = (window.SmartCodeConfig?.server?.httpUrl || "http://localhost:3000") + "/projects";
+        const res = await fetch(url);
+        if (!res.ok) return [];
+        const { projects } = await res.json();
+        return projects;
+      } catch {
+        return [];
+      }
+    },
+
     initEditor(
       divId,
-      showToolbar = true,
+      showToolbar     = true,
       showTabStatusbar = true,
       showDiagnostics = true,
-      editorMode = 1,
-      options = {}
+      mode            = editorMode.PROJECT,
+      options         = {}
     ) {
-      return new EditorAPI(
-        divId,
-        showToolbar,
-        showTabStatusbar,
-        showDiagnostics,
-        editorMode,
-        options
-      );
+      return new EditorAPI(divId, showToolbar, showTabStatusbar, showDiagnostics, mode, options);
     }
   };
 
