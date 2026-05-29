@@ -13,13 +13,13 @@ The editor can be used as a full project editor, as a folder-based editor, or as
 
 ## Features
 
-- **Syntax highlighting** for Java, C, and C++
+- **Syntax highlighting** for Java, C and C++
 - **Real-time IntelliSense**: autocomplete, diagnostics, hover and signature help
 - **Inline error and warning markers** with gutter icons
-- **Cross-file Java support** when all project files are opened or scanned into the LSP workspace
+- **Cross-file Java support** when related `.java` files are available in the LSP workspace
 - **Three usage modes**: project, folder and embedded single editor
-- **Configurable workspace synchronisation** between `/workspace` and `/algator-root`
-- **Optional lsyncd support** for background file watching and synchronisation
+- **Configurable workspace synchronisation** from `/workspace` to `/target-root`
+- **lsyncd-based background synchronisation** controlled from editor initialisation/API options
 - **Browser-only client**: users do not need local language servers installed
 
 ---
@@ -40,13 +40,13 @@ Docker LSP Bridge
   ├── clangd
   ├── Eclipse JDT Language Server
   ├── lsyncd / rsync
-  ├── /workspace
-  └── /algator-root
+  ├── /workspace      # LSP working directory
+  └── /target-root    # synchronisation target directory
 ```
 
 The browser communicates with the Docker bridge through WebSocket connections. The bridge forwards LSP JSON-RPC messages to `clangd` or `jdtls`.
 
-Source files are staged in `/workspace`, which is the main LSP working directory. When synchronisation is enabled, changes can be copied from `/workspace` to `/algator-root`.
+Source files are staged in `/workspace`, which is the main LSP working directory. When synchronisation is enabled, `lsyncd` watches `/workspace` or a selected subfolder and synchronises changes to `/target-root`.
 
 ---
 
@@ -67,10 +67,8 @@ Linux/macOS example:
 ```bash
 docker run --rm -it \
   -p 3000:3000 \
-  -e ENABLE_LSYNC=true \
-  -e SYNC_ROOT=main \
   -v "$PWD/workspace:/workspace" \
-  -v "$PWD/algator-root:/algator-root" \
+  -v "$PWD/target-root:/target-root" \
   smartcode-lsp
 ```
 
@@ -79,14 +77,14 @@ Windows PowerShell example:
 ```powershell
 docker run --rm -it `
   -p 3000:3000 `
-  -e ENABLE_LSYNC=true `
-  -e SYNC_ROOT=main `
   -v "C:\xampp\htdocs\smartCodev3\workspace:/workspace" `
-  -v "C:\xampp\htdocs\smartCodev3\algator-root:/algator-root" `
+  -v "C:\xampp\htdocs\smartCodev3\algator-root:/target-root" `
   smartcode-lsp
 ```
 
-`/workspace` is used by the editor and language servers. `/algator-root` is the target folder for synchronisation.
+`/workspace` is used by the editor and language servers. `/target-root` is the generic target folder for synchronisation.
+
+The local folder can still be named `algator-root` if the project needs that name, but inside Docker the target path is generic: `/target-root`.
 
 ### 3. Open the editor
 
@@ -106,59 +104,103 @@ Do not use port `3000` for the static frontend if the Docker LSP bridge is alrea
 
 ---
 
-## Docker Options
+## Synchronisation Model
 
-### Enable or disable lsyncd at runtime
+SmartCode now uses **lsyncd as the only workspace-to-target synchronisation mechanism**.
 
-Enable lsyncd:
+The save flow is:
 
-```bash
--e ENABLE_LSYNC=true
+```text
+editor
+  -> POST /workspace/path/to/file
+  -> server writes the file to /workspace
+  -> lsyncd detects the change
+  -> lsyncd synchronises it to /target-root
 ```
 
-Disable lsyncd:
+The server does **not** run an additional direct `rsync` after each editor save. This avoids duplicated synchronisation logic and makes the behaviour clearer:
 
-```bash
--e ENABLE_LSYNC=false
+```text
+lsyncEnabled: true   -> lsyncd watches and synchronises
+lsyncEnabled: false  -> files are saved to /workspace only
 ```
 
-When lsyncd is disabled, the background watcher is not started. The editor can still write files to `/workspace`; only automatic background watching/syncing is disabled.
+### `syncRoot`
 
-### Set the initial sync root
+`syncRoot` is a relative path inside `/workspace`.
 
-```bash
--e SYNC_ROOT=main
+```js
+syncRoot: "main"
+```
+
+means:
+
+```text
+/workspace/main      ->      /target-root/main
+```
+
+All subfolders inside `main` are included.
+
+```js
+syncRoot: ""
+```
+
+means:
+
+```text
+/workspace           ->      /target-root
+```
+
+### `lsyncEnabled`
+
+`lsyncEnabled` controls whether the lsyncd watcher should be running.
+
+```js
+lsyncEnabled: true
+```
+
+starts or keeps lsyncd active.
+
+```js
+lsyncEnabled: false
+```
+
+stops or disables lsyncd. The editor can still save files to `/workspace`, but they will not be copied to `/target-root`.
+
+### Change sync root at runtime
+
+```js
+await ed.setSyncRoot("main2", true);
+```
+
+This changes the sync root to:
+
+```text
+/workspace/main2     ->      /target-root/main2
+```
+
+### Disable lsyncd at runtime
+
+```js
+await ed.setLsyncEnabled(false);
+```
+
+### Enable lsyncd again
+
+```js
+await ed.setLsyncEnabled(true);
+```
+
+### Sync the whole workspace
+
+```js
+await ed.setSyncRoot("", true);
 ```
 
 This means:
 
 ```text
-/workspace/main      ->      /algator-root/main
-```
-
-The sync root is recursive, so all subfolders inside `main` are included.
-
-If `SYNC_ROOT` is empty or omitted, the whole workspace is used:
-
-```text
-/workspace           ->      /algator-root
-```
-
-### Build Docker without installing lsyncd
-
-If your `Dockerfile` supports the `INSTALL_LSYNC` build argument, you can build without lsyncd:
-
-```bash
-docker build -f langserver/docker/Dockerfile \
-  -t smartcode-lsp \
-  --build-arg INSTALL_LSYNC=false \
-  langserver/
-```
-
-If you build without lsyncd, also run the container with:
-
-```bash
--e ENABLE_LSYNC=false
+/workspace           ->      /target-root
 ```
 
 ---
@@ -217,7 +259,7 @@ var ed = smartCodeEditor.initEditor(
 This uses:
 
 ```text
-/workspace/main      ->      /algator-root/main
+/workspace/main      ->      /target-root/main
 ```
 
 including all subfolders.
@@ -265,6 +307,9 @@ var ed = smartCodeEditor.initEditor(
     // Folder watched/synchronised recursively.
     syncRoot: "main",
 
+    // Optional: exact workspace file used by the embedded editor.
+    savePath: "main/src/Main.java",
+
     // Enables or disables background lsyncd.
     lsyncEnabled: true
   }
@@ -279,84 +324,39 @@ For Java cross-file autocomplete, make sure `folder` points to the directory tha
 
 ---
 
-## Synchronisation Behaviour
+## Main Options
 
-### `syncRoot`
+| Option | Description |
+|---|---|
+| `language` | Initial language for single/embedded mode: `"java"`, `"c"` or `"cpp"`. |
+| `folder` | LSP context folder inside `/workspace`. Used for scanning related files. |
+| `syncRoot` | Folder inside `/workspace` that lsyncd watches recursively. Empty string means the whole workspace. |
+| `savePath` | Optional exact workspace file path for single/embedded mode. |
+| `lsyncEnabled` | Enables or disables lsyncd synchronisation. |
 
-`syncRoot` is a relative path inside `/workspace`.
+Recommended example for embedded Java usage:
 
 ```js
-syncRoot: "main"
+{
+  language: "java",
+  folder: "main/src",
+  syncRoot: "main",
+  savePath: "main/src/Main.java",
+  lsyncEnabled: true
+}
 ```
 
-means:
+Meaning:
 
 ```text
-/workspace/main      ->      /algator-root/main
-```
+LSP context:
+  /workspace/main/src
 
-All subfolders inside `main` are included.
+Editor save path:
+  /workspace/main/src/Main.java
 
-```js
-syncRoot: ""
-```
-
-means:
-
-```text
-/workspace           ->      /algator-root
-```
-
-### `lsyncEnabled`
-
-`lsyncEnabled` controls the background lsyncd watcher.
-
-```js
-lsyncEnabled: true
-```
-
-starts or keeps lsyncd active.
-
-```js
-lsyncEnabled: false
-```
-
-stops or disables lsyncd.
-
-### Change sync root at runtime
-
-```js
-await ed.setSyncRoot("main2", true);
-```
-
-This changes the sync root to:
-
-```text
-/workspace/main2     ->      /algator-root/main2
-```
-
-### Disable lsyncd at runtime
-
-```js
-await ed.setLsyncEnabled(false);
-```
-
-### Enable lsyncd again
-
-```js
-await ed.setLsyncEnabled(true);
-```
-
-### Sync the whole workspace
-
-```js
-await ed.setSyncRoot("", true);
-```
-
-This means:
-
-```text
-/workspace           ->      /algator-root
+Synchronisation:
+  /workspace/main  ->  /target-root/main
 ```
 
 ---
@@ -378,6 +378,10 @@ All modes return an `EditorAPI` object.
 | `openProject(project)` | Loads a project object. Available in project mode. |
 | `openDirectoryProject()` | Opens the native directory picker. Available in project/folder modes. |
 | `getProjectInfo()` | Returns current project metadata. Available in project/folder modes. |
+| `configure(options)` | Updates main options such as `folder`, `syncRoot`, `savePath` and `lsyncEnabled`. |
+| `getOptions()` | Returns current editor configuration. |
+| `setFolder(folder)` | Changes the LSP context folder. |
+| `setSavePath(savePath)` | Changes the save path for single/embedded mode. |
 | `setDiagnosticsVisible(bool)` | Shows or hides diagnostics. |
 | `setToolbarVisible(bool)` | Shows or hides the toolbar. |
 | `setTabStatusbarVisible(bool)` | Shows or hides tabs and the status bar. |
@@ -399,12 +403,12 @@ All modes return an `EditorAPI` object.
 | `/health` | GET | Returns bridge status, LSP status, sync state and file list. |
 | `/scan?folder=path` | GET | Recursively scans `/workspace/path`. Omit `folder` to scan all workspace. |
 | `/workspace/path/to/file` | GET | Reads a file from `/workspace`. |
-| `/workspace/path/to/file` | POST | Writes a file to `/workspace`. |
+| `/workspace/path/to/file` | POST | Writes a file to `/workspace`. lsyncd handles target synchronisation if enabled. |
 | `/workspace-patch/path/to/file` | POST | Applies a CodeMirror-style text patch to a workspace file. |
 | `/sync-root` | POST | Sets `syncRoot` and `lsyncEnabled`. |
 | `/notify` | POST | Sends file-change notification to the Java language server. |
-| `/algator/path/to/file` | POST | Writes a file into both `/algator-root` and `/workspace`. |
-| `/projects` | GET | Lists directories in `/algator-root`. |
+| `/target/path/to/file` | POST | Writes a file to `/workspace`; lsyncd then synchronises it to `/target-root` if enabled. |
+| `/projects` | GET | Lists directories in `/target-root`. |
 
 Example `/sync-root` request:
 
@@ -587,10 +591,12 @@ smartCodev3/
 │
 ├── workspace/
 │
-└── algator-root/
+└── target-root/
 ```
 
-`workspace/` is the LSP working directory. `algator-root/` is the synchronisation target.
+`workspace/` is the LSP working directory. `target-root/` is the synchronisation target.
+
+If your existing local project still uses the folder name `algator-root`, you can keep it locally and mount it to `/target-root` in Docker.
 
 ---
 
@@ -602,6 +608,7 @@ smartCodev3/
 | Docker | 20.10+ |
 | Java server | JDK 21 inside Docker |
 | C/C++ server | clangd inside Docker |
+| Sync | lsyncd inside Docker |
 | Server RAM | At least 2 GB recommended |
 | Disk | Around 1 GB for the Docker image |
 
@@ -612,8 +619,81 @@ smartCodev3/
 - The File System Access API is supported mainly in Chrome and Edge.
 - C/C++ IntelliSense is best when `compile_commands.json` is available.
 - Java cross-file autocomplete requires the related files to be in the LSP workspace and opened or scanned by the editor.
-- If lsyncd is disabled, changes made outside the editor may not automatically propagate to `/algator-root`.
+- If lsyncd is disabled, changes are saved to `/workspace` but are not automatically copied to `/target-root`.
 - Each page load starts a new browser-side editor session.
+
+---
+
+## Troubleshooting
+
+### JDT LS starts, but autocomplete or diagnostics do not show
+
+Check that all paths use the same workspace:
+
+```text
+Docker mount:     /workspace
+config rootUri:   file:///workspace
+server workspace: /workspace
+```
+
+In `js/config.js`:
+
+```js
+workspace: {
+  rootUri: "file:///workspace"
+}
+```
+
+Also check the browser console:
+
+```js
+SmartCodeConfig.workspace.rootUri
+SmartCodeConfig.server.wsJava
+```
+
+Expected:
+
+```text
+file:///workspace
+ws://localhost:3000/java
+```
+
+### Java does not find functions from another file
+
+Make sure the related `.java` files are in the configured `folder` or below it.
+
+```js
+{
+  folder: "main/src",
+  syncRoot: "main"
+}
+```
+
+If `Main.java` and `Helper.java` are both in `/workspace/main/src`, then `Helper` should be visible from `Main`.
+
+### lsyncd does not synchronise
+
+Check `/health`:
+
+```text
+http://localhost:3000/health
+```
+
+It should show:
+
+```json
+{
+  "lsyncEnabled": true,
+  "lsyncd": true,
+  "syncRoot": "main",
+  "syncSource": "/workspace/main",
+  "syncTarget": "/target-root/main"
+}
+```
+
+### `showDirectoryPicker` AbortError
+
+This usually means the user cancelled the folder picker. It is not an LSP error.
 
 ---
 
