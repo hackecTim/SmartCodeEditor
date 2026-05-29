@@ -1,55 +1,107 @@
 <!DOCTYPE html>
-<html lang="sl">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SmartCode • Code Editor</title>
   <link rel="icon" href="img/smartCodeLogo2.svg" type="image/svg+xml" />
-
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/eclipse.min.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/default.min.css" />
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css" />
-  <link rel="stylesheet" href="./css/editorStyle.css" />
+  <link rel="stylesheet" href="codemirror/lib/codemirror.css" />
+  <link rel="stylesheet" href="codemirror/theme/eclipse.css" />
+  <link rel="stylesheet" href="codemirror/theme/abcdef.css" />
+  <link rel="stylesheet" href="codemirror/addon/hint/show-hint.css" />
+  <link rel="stylesheet" href="css/editorStyle.css" />
 </head>
 <body>
 
+  <script src="codemirror/lib/codemirror.js"></script>
+  <script src="codemirror/mode/clike/clike.js"></script>
+  <script src="codemirror/addon/edit/matchbrackets.js"></script>
+  <script src="codemirror/addon/edit/closebrackets.js"></script>
+  <script src="codemirror/addon/hint/show-hint.js"></script>
+  <script src="js/config.js"></script>
+  <script src="langserver/js/lspClient.js"></script>
+  <script src="js/smartCodeEditor.js"></script>
+  <script src="js/editorMain.js"></script>
 
-  <div id="editorDiv" style="width:100%; height:100vh;"></div>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/clike/clike.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/closebrackets.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
-
-  <script src="./js/config.js"></script>
-  <script src="./langserver/js/lspClient.js"></script>
-  <script src="./js/smartCodeEditor.js"></script>
-  <script src="./js/editorMain.js"></script>
+  <div id="editorDiv" style="height: 100vh;"></div>
 
   <script>
-    // Parametri:
-    // 1. id diva, kamor se editor naloži
-    // 2. toolbar: true/false
-    // 3. tabbar + statusbar: true/false
-    // 4. diagnostika: true/false
-    // 5. način editorja:
-    //    1 = normalno kot zdaj: prazen editor, uporabnik sam odpira projekt/datoteke
-    //    2 = ob zagonu vpraša za direktorij; vse datoteke iz direktorija/podmap odpre v zavihkih in uporabi v LSP
-    //    3 = način za več vgrajenih urejevalnikov na eni strani
-    var mojEditor = smartCodeEditor.initEditor("editorDiv", true, true, true, 1);
+  /*var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.SINGLE,
+  {
+    language: "java",
+    folder: "main/src",
+    syncRoot: ""
+  }
+  
+  primer uporabe 
+  var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.PROJECT,
+  {
+    folder: "project1",
+    syncRoot: "project1",
+    lsyncEnabled: true
+  }
+);
+);*/
+  var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,
+  true,
+  true,
+  smartCodeEditor.editorMode.PROJECT,
+  {
+    syncRoot: "",
+    lsyncEnabled: true
+  }
+);
+  //fOLDER
+   /* var ed = smartCodeEditor.initEditor(
+      "editorDiv",
+      true,
+      true,
+      true,
+      smartCodeEditor.editorMode.PROJECT
+    );
+	
 
-    // Primer programskega projekta:
-    // mojEditor.whenReady().then(ed => ed.openProject({
-    //   id: "primer",
-    //   name: "Primer projekt",
-    //   files: [
-    //     { path: "Main.java", content: "public class Main { }" },
-    //     { path: "Helper.java", content: "public class Helper { }" }
-    //   ]
-    // }));
-  </script>
+    
+	
+	3. NAČIN SINGLE
+	
+	var ed = smartCodeEditor.initEditor(
+  "editorDiv",
+  true,  // showToolbar: prikaže zgornjo orodno vrstico z gumbi New, Open, Save ...
+  true,  // showTabStatusbar: prikaže zavihke datotek in spodnjo statusno vrstico
+  true,  // showDiagnostics: prikaže diagnostiko, napake in opozorila 
+  smartCodeEditor.editorMode.SINGLE,
+  {
+    language: "java",
+    folder: "myproject/src"
+  }
+);
+
+ed.whenReady().then(() => {
+  ed.setContent("public class Main { }", "java");
+});
+
+var ed = smartCodeEditor.initEditor(
+      "editorDiv",
+      true,
+      true,
+      true,
+      smartCodeEditor.editorMode.PROJECT
+    );
+*/
+	</script>
 
 </body>
 </html>

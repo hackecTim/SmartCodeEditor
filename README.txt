@@ -16,10 +16,6 @@ Pride lahko tudi do kasnejse delovanja strežnika zato je pomembno, da se osvež
 
 
 
-
-
-
-
 This product includes Eclipse JDT Language Server
 Copyright (c) Eclipse contributors
 License: Eclipse Public License 2.0 (EPL-2.0)
