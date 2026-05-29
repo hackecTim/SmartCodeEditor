@@ -1,0 +1,12 @@
+[
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/c++   -g -std=gnu++17 -o CMakeFiles/main_cpp.dir/main.cpp.o -c /workspace/main.cpp",
+  "file": "/workspace/main.cpp"
+},
+{
+  "directory": "/workspace/build",
+  "command": "/usr/bin/cc   -g -std=gnu11 -o CMakeFiles/main_c.dir/main.c.o -c /workspace/main.c",
+  "file": "/workspace/main.c"
+}
+]
