@@ -7,9 +7,7 @@ public class Helper {
     public static double average(double a, double b) {
         return (a + b) / 2.0;
     }
-
-  
-  s
+    
     public static String joinText2(String first, String second) {
         return first + " " + second;
     }
