@@ -33,7 +33,7 @@ function syncToWorkspace(filepath) {
   }
 }
 
-// workspace → algator-root (ko editor shrani)
+// workspace → algator-root 
 async function syncToAlgator(rel, content) {
   const dest = join(ALGATOR_ROOT, rel);
   try {
@@ -53,11 +53,10 @@ async function notifyServer(rel, type = 2, isJarFile = false) {
       body: JSON.stringify({ file: rel, type, isJar: isJarFile })
     });
   } catch {
-    // server morda še ni zagotovljen
+
   }
 }
 
-// Začetna sinhronizacija algator-root → workspace ob zagonu
 async function initialSync(dir) {
   let entries;
   try { entries = await readdir(dir, { withFileTypes: true }); }
@@ -70,10 +69,10 @@ async function initialSync(dir) {
   }
 }
 
-// Timestamp zadnjega zapisa iz serverja (workspace→algator) — prepreči zanko
+
 const recentServerWrites = new Map();
 
-// Pokliče server ko zapiše v algator-root da watcher ve da ga ignorira
+
 export function markServerWrite(rel) {
   recentServerWrites.set(normalizePath(rel), Date.now());
   setTimeout(() => recentServerWrites.delete(normalizePath(rel)), 2000);
@@ -88,7 +87,7 @@ function normalizePath(p) {
   return String(p || "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
 }
 
-// Opazuje algator-root za spremembe (zunanji sistem piše datoteke)
+
 function watchAlgatorRoot() {
   watch(ALGATOR_ROOT, { recursive: true }, (event, filename) => {
     if (!filename) return;
@@ -96,7 +95,7 @@ function watchAlgatorRoot() {
     const full = join(ALGATOR_ROOT, filename);
 
     setTimeout(() => {
-      // Preskoči če je server ravnokar zapisal to datoteko (prepreči zanko)
+
       if (isRecentServerWrite(rel)) return;
 
       stat(full)
