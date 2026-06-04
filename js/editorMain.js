@@ -19,20 +19,19 @@ let suppressInputRead = false;
 let completionReqSeq = 0;
 let clangdInitialized = false;
 let javaInitialized = false;
+let didChangeWatchedTimer = null;
 const openedDocs = new Set();
 
 let activeFolderHandle = null;
 
-// Project state: standalone mode ne naloži ničesar avtomatsko.
-// Datoteke obstajajo šele znotraj aktivnega projekta.
+
 let activeProject = null;
 let browserPersistenceEnabled = false;
 
 const DEBUG_LSP = false;
 
-//──────────────────────────────────────────────────────────────────────
 // Helperji
-//──────────────────────────────────────────────────────────────────────
+
 
 function debugLog(...args) {
   if (DEBUG_LSP) console.log(...args);
@@ -93,9 +92,8 @@ function severityToLabel(severity) {
   return "Hint";
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Browser cache
-//──────────────────────────────────────────────────────────────────────
+
 
 function cacheKeyForFile(filename) {
   return `smartcode:${currentStorageNamespace()}:file:${normalizePath(filename)}`;
@@ -174,10 +172,6 @@ function loadBrowserWorkspace(projectMeta = null) {
     console.warn("loadBrowserWorkspace failed:", e.message);
   }
 }
-
-//──────────────────────────────────────────────────────────────────────
-// Jezik iz končnice
-//──────────────────────────────────────────────────────────────────────
 
 function modeForFile(filename) {
   const f = normalizePath(filename).toLowerCase();
@@ -286,9 +280,9 @@ function docState() {
   return st;
 }
 
-//──────────────────────────────────────────────────────────────────────
-// Lokalni file handles
-//──────────────────────────────────────────────────────────────────────
+
+// Local file handles
+
 
 async function readHandleText(handle) {
   const file = await handle.getFile();
@@ -325,7 +319,6 @@ async function ensureLocalHandleForState(filename, st) {
 async function loadContentForState(filename, st) {
   const norm = normalizePath(filename);
 
-  // 1) Če je datoteka odprta iz lokalnega folderja, beri direktno iz nje
   if (st.handle) {
     try {
       const text = await readHandleText(st.handle);
@@ -337,7 +330,6 @@ async function loadContentForState(filename, st) {
     }
   }
 
-  // 2) Če obstaja server workspace, naj ima prednost pred browser cache
   if (hasServerSupport()) {
     try {
       const res = await fetch(`${CFG.server.httpUrl}/workspace/${escapePathSegment(norm)}`, {
@@ -355,14 +347,12 @@ async function loadContentForState(filename, st) {
     }
   }
 
-  // 3) Browser cache je samo fallback
   const cached = readFileFromBrowser(norm);
   if (cached !== null) {
     st.content = cached;
     return cached;
   }
 
-  // 4) Default snippet samo če datoteka res nima nobene vsebine
   st.content = defaultSnippet(norm);
   return st.content;
 }
@@ -394,8 +384,6 @@ async function writeStateToLocal(filename, st, { promptIfNeeded = true } = {}) {
   return true;
 }
 
-//──────────────────────────────────────────────────────────────────────
-//──────────────────────────────────────────────────────────────────────
 
 async function syncFileToServer(filename, content) {
   if (!hasServerSupport()) return false;
@@ -437,7 +425,7 @@ async function notifyServerFileChange(filename, type = 2) {
   }
 }
 
-async function setServerSyncRoot(syncRoot = "", lsyncEnabled = false) {
+async function setServerSyncRoot(syncRoot) {
   if (!hasServerSupport()) return false;
 
   const root = normalizePath(syncRoot || "").replace(/\/+$/, "");
@@ -446,12 +434,8 @@ async function setServerSyncRoot(syncRoot = "", lsyncEnabled = false) {
     const res = await fetch(`${CFG.server.httpUrl}/sync-root`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        syncRoot: root,
-        lsyncEnabled: lsyncEnabled === true
-      })
+      body: JSON.stringify({ syncRoot: root })
     });
-
     return res.ok;
   } catch (e) {
     console.warn("setServerSyncRoot failed:", e.message);
@@ -459,9 +443,7 @@ async function setServerSyncRoot(syncRoot = "", lsyncEnabled = false) {
   }
 }
 
-//──────────────────────────────────────────────────────────────────────
 // LSP routing
-//──────────────────────────────────────────────────────────────────────
 
 function lspRequest(method, params) {
   if (!hasServerSupport()) return Promise.reject(new Error("No server"));
@@ -495,9 +477,7 @@ function lspReady() {
   return false;
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Signature hint
-//──────────────────────────────────────────────────────────────────────
 
 let sigEl = null;
 
@@ -563,9 +543,7 @@ function scheduleSignatureRefresh(triggerChar, isRetrigger, delay) {
   }, delay ?? CFG.editor.completionDelay);
 }
 
-//──────────────────────────────────────────────────────────────────────
-// Completion pomoč
-//──────────────────────────────────────────────────────────────────────
+// Completion help
 
 function stripSnippets(text) {
   if (!text) return "";
@@ -707,26 +685,18 @@ function appendLabelWithBoldPrefix(labelSpan, label, prefix) {
   labelSpan.appendChild(document.createTextNode(text.slice(idx + p.length)));
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Startup
-//──────────────────────────────────────────────────────────────────────
 
 document.addEventListener("DOMContentLoaded", async () => {
 
-  // ── Mode 3 (embedded): samo LSP, brez globalnega editorja ───────────
   if (window.smartCodeInitialMode === 3) {
     if (hasServerSupport()) {
-      const opts = window.smartCodeInitialOptions || {};
-      const hasSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
-      const syncRoot = hasSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
-      await setServerSyncRoot(syncRoot, opts.lsyncEnabled === true);
       initClangdLsp();
       initJavaLsp();
     }
     return;
   }
 
-  // ── Mode 1 / 2: normalni zagon ─────────────────────────────────────
   initEditor();
   initUI();
   renderTabs();
@@ -734,10 +704,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   setServerInfo("LSP: starting…");
 
   if (hasServerSupport()) {
-    const opts = window.smartCodeInitialOptions || {};
-    const hasSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
-    const syncRoot = hasSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
-    await setServerSyncRoot(syncRoot, opts.lsyncEnabled === true);
+    const hasExplicitSyncRoot = Object.prototype.hasOwnProperty.call(window.smartCodeInitialOptions || {}, "syncRoot");
+    const syncRoot = hasExplicitSyncRoot
+      ? (window.smartCodeInitialOptions?.syncRoot || "")
+      : (window.smartCodeInitialOptions?.folder || "");
+    setServerSyncRoot(syncRoot);
+
     initClangdLsp();
     initJavaLsp();
   } else {
@@ -745,12 +717,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 });
 
-//──────────────────────────────────────────────────────────────────────
 // Editor setup
-//──────────────────────────────────────────────────────────────────────
 
 function initEditor() {
-  // Išče textarea znotraj .editor-wrapper, ne kontejnerski div
   let ta = document.querySelector(".editor-wrapper textarea");
   if (!ta) {
     setTimeout(initEditor, 50);
@@ -803,8 +772,7 @@ function initEditor() {
   updateEditorLanguageClass("text/plain");
   editor.refresh();
 
-  // Native keydown interceptor za autocomplete puščice.
-  // Capture phase (true) zagotovi, da se izvede PRED CodeMirrorjem.
+
   editor.getWrapperElement().addEventListener("keydown", function(e) {
     const hint = editor.state.completionActive;
     if (!hint) return;
@@ -857,21 +825,36 @@ function initEditor() {
   const st = fileStates.get(changedFile);
   if (!st) return;
 
-    st.version++;
-    st.dirty = true;
-    st.content = editor.getValue();
+  st.version++;
+  st.dirty = true;
+  st.content = editor.getValue();
 
-        persistFileToBrowser(changedFile, st.content);
+  persistFileToBrowser(changedFile, st.content);
 
-    setAutosaveInfo("Autosave: pending…", "autosave-pending");
-    renderTabs();
+  setAutosaveInfo("Autosave: pending…", "autosave-pending");
+  renderTabs();
 
-    if (lspReady()) {
-      lspNotification("textDocument/didChange", {
-        textDocument: { uri: st.uri, version: st.version },
-        contentChanges: [{ text: st.content }]
-      });
+  if (lspReady()) {
+    lspNotification("textDocument/didChange", {
+      textDocument: { uri: st.uri, version: st.version },
+      contentChanges: [{ text: st.content }]
+    });
+
+    if (isJava() && typeof sendJavaNotification === "function") {
+      clearTimeout(didChangeWatchedTimer);
+      didChangeWatchedTimer = setTimeout(() => {
+        const changes = [...openedDocs]
+          .filter(uri => uri !== st.uri)
+          .map(uri => ({ uri, type: 2 }));
+
+        if (changes.length) {
+          sendJavaNotification("workspace/didChangeWatchedFiles", {
+            changes
+          });
+        }
+      }, 500);
     }
+  }
 
     clearTimeout(autosaveTimer);
     autosaveTimer = setTimeout(() => saveFile(changedFile, true), CFG.editor.autosaveDelay);
@@ -960,18 +943,18 @@ function initEditor() {
   updateCursorInfo();
 }
 
-//──────────────────────────────────────────────────────────────────────
 // File management
-//──────────────────────────────────────────────────────────────────────
 
 async function refreshFileList({ openFirst = false, includeServerWorkspace = false } = {}) {
   let files = [];
 
-  // Server /scan uporabljamo samo, če projekt to izrecno zahteva.
-  // Ob navadnem zagonu editorja se workspace ne odpre avtomatsko.
   if (includeServerWorkspace && hasServerSupport()) {
     try {
-      const res = await fetch(`${CFG.server.httpUrl}/scan`);
+      const scanFolder = normalizePath(window.smartCodeInitialOptions?.folder || window.smartCodeInitialOptions?.syncRoot || "");
+      const scanUrl = scanFolder
+        ? `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(scanFolder)}`
+        : `${CFG.server.httpUrl}/scan`;
+      const res = await fetch(scanUrl);
       if (res.ok) {
         const data = await res.json();
         files = (data.files || []).filter(f => isCodeFile(f));
@@ -1378,7 +1361,6 @@ function initUI() {
   document.getElementById("demoProjectBtn")?.addEventListener("click", openDemoProject);
   document.getElementById("saveBtn")?.addEventListener("click", () => saveActiveFile(false));
 
-  // Open button: če browser podpira File System Access, uporabi to
   document.getElementById("openBtn")?.addEventListener("click", async () => {
     if (window.showOpenFilePicker) {
       await openFilesWithPicker();
@@ -1570,9 +1552,7 @@ async function openFolderWorkspace() {
 
 window.openSmartCodeFolderProject = openFolderWorkspace;
 
-//──────────────────────────────────────────────────────────────────────
 // LSP — clangd
-//──────────────────────────────────────────────────────────────────────
 
 function initClangdLsp() {
   if (typeof connectLsp !== "function") return;
@@ -1617,9 +1597,7 @@ function initClangdLsp() {
   });
 }
 
-//──────────────────────────────────────────────────────────────────────
 // LSP — jdtls
-//──────────────────────────────────────────────────────────────────────
 
 function initJavaLsp() {
   if (typeof connectJavaLsp !== "function") return;
@@ -1690,7 +1668,6 @@ function initJavaLsp() {
   });
 }
 
-// Odpri VSE .java datoteke v workspace
 async function openAllJavaFilesInLsp() {
   if (!hasServerSupport() || !javaInitialized) return;
 
@@ -1787,9 +1764,7 @@ function updateServerInfo() {
   else setServerInfo("LSP: —");
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Signature Help
-//──────────────────────────────────────────────────────────────────────
 
 function requestSignatureHelp(triggerChar, isRetrigger) {
   if (!lspReady()) return;
@@ -1848,9 +1823,7 @@ function requestSignatureHelp(triggerChar, isRetrigger) {
     .catch(() => {});
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Completion
-//──────────────────────────────────────────────────────────────────────
 
 function requestCompletion(triggerChar = null) {
   if (!lspReady()) return;
@@ -1890,7 +1863,6 @@ function requestCompletion(triggerChar = null) {
         return;
       }
 
-      // Filtriraj po prefixu
       if (typedPrefix && (!isJava() || isMember)) {
         const lower = typedPrefix.toLowerCase();
         items = items.filter(item =>
@@ -1900,7 +1872,6 @@ function requestCompletion(triggerChar = null) {
         );
       }
 
-      // sortText filter
       if (isClangd()) {
         if (isMember) {
           const m = items.filter(i => (i.sortText || "9") < "4");
@@ -1940,7 +1911,7 @@ function requestCompletion(triggerChar = null) {
             : item.label;
           return {
             text: callable ? getFunctionName(item) + "()" : getInsertText(item) || item.label,
-            // render: gradi HTML element z barvanim tipom + bold prefix
+    
             render(el) {
               el.className = "CodeMirror-hint lsp-hint-item";
 
@@ -1990,9 +1961,7 @@ function requestCompletion(triggerChar = null) {
     .catch(e => console.error("Completion failed:", e));
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Save
-//──────────────────────────────────────────────────────────────────────
 
 async function saveFile(filename, silent = false) {
   const norm = normalizePath(filename);
@@ -2007,10 +1976,8 @@ async function saveFile(filename, silent = false) {
 
   st.content = content;
 
-  // 1) Vedno shrani v browser cache
   const cachedOk = persistFileToBrowser(norm, content);
 
-  // 2) Poskusi lokalni write, če obstaja handle
   let wroteLocal = false;
   try {
     wroteLocal = await writeStateToLocal(norm, st, {
@@ -2020,7 +1987,6 @@ async function saveFile(filename, silent = false) {
     console.warn("writeStateToLocal failed:", e.message);
   }
 
-  // 3) Server mirror
   let mirrored = false;
   try {
     mirrored = await mirrorStateToServer(norm);
@@ -2028,7 +1994,6 @@ async function saveFile(filename, silent = false) {
     console.warn("mirrorStateToServer failed:", e.message);
   }
 
-  // 4) LSP save notify samo za trenutno odprto datoteko
   if (norm === activeFile && hasServerSupport() && lspReady()) {
     try {
       lspNotification("textDocument/didSave", {
@@ -2073,9 +2038,7 @@ async function saveActiveFile(silent = false) {
   return saveFile(activeFile, silent);
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Diagnostics — per file
-//──────────────────────────────────────────────────────────────────────
 
 function renderDiagnostics(diagnostics, uri) {
   if (!editor) return;
@@ -2154,7 +2117,7 @@ function renderDiagnosticsPanel(uri, diagnostics) {
 
   listEl.innerHTML = "";
 
-  // Če je diagnostika izklopljena ali napak/opozoril ni, spodnjega območja ne pokažemo.
+
   if (window.smartCodeShowDiagnostics === false || !items.length) {
     panel.classList.remove("has-problems");
     panel.style.display = "none";
@@ -2206,9 +2169,7 @@ function clearDiagnosticsForFile(uri) {
   renderDiagnosticsPanel(uri, []);
 }
 
-//──────────────────────────────────────────────────────────────────────
 // Status bar
-//──────────────────────────────────────────────────────────────────────
 
 function updateCursorInfo() {
   const pos = editor?.getCursor();
@@ -2228,21 +2189,20 @@ function setAutosaveInfo(t, c) {
   el.textContent = t;
   el.className = c;
 }
-// ═══════════════════════════════════════════════════════════════════════════
-// EMBEDDED MODE (mode 3) — izolirani urejevalniki brez zavihkov in autosave
-//
-// Vsak klic window.createTargetEditor(containerEl, opts) vrne neodvisno
-// instanco CodeMirror z lastnim LSP kontekstom, diagnostikami in API-jem.
-//
-// Opcije:
-//   language        "java" | "c" | "cpp"  (privzeto: "java")
-//   folder          relativna podmapa workspace za LSP kontekst (opcijsko)
-//   showDiagnostics true/false (privzeto: true)
-// ═══════════════════════════════════════════════════════════════════════════
+/* ═══════════════════════════════════════════════════════════════════════════
+  mode 3 — izolirani urejevalniki brez zavihkov in autosave
 
-let _embeddedIdCounter = 0;
+ Vsak klic window.createAlgatorEditor(containerEl, opts) vrne neodvisno
+ instanco CodeMirror z lastnim LSP kontekstom, diagnostikami in API-jem.
 
-// Počaka, da je LSP inicializiran (initialize/initialized handshake je končan).
+ Opcije:
+   language        "java" | "c" | "cpp"  (privzeto: "java")
+   folder          relativna podmapa workspace za LSP kontekst (opcijsko)
+  showDiagnostics true/false (privzeto: true)
+*/ ═══════════════════════════════════════════════════════════════════════════
+
+let _algatorIdCounter = 0;
+
 function _waitLspInit(isJava) {
   return new Promise(resolve => {
     const check = () => {
@@ -2254,13 +2214,13 @@ function _waitLspInit(isJava) {
   });
 }
 
-class EmbeddedEditorInstance {
+class AlgatorInstance {
   constructor(containerEl, opts = {}) {
-    this.id       = _embeddedIdCounter++;
+    this.id       = _algatorIdCounter++;
     this.language = opts.language || "java";
     this.folder   = opts.folder   || null;
     this.syncRoot = opts.syncRoot || null;
-    this.savePath = opts.savePath ? normalizePath(opts.savePath) : null;
+    this.savePath = opts.savePath || null;
     this._showDiagnostics = opts.showDiagnostics !== false;
     this._marks   = [];
     this._version = 1;
@@ -2295,7 +2255,7 @@ class EmbeddedEditorInstance {
     this.uri = uriForFile(this.virtualFile);
   }
 
-  // ── DOM ─────────────────────────────────────────────────────────────
+  //DOM
   _buildDom(container) {
         const wrapper = document.createElement("div");
     wrapper.className = "editor-wrapper";
@@ -2311,15 +2271,15 @@ class EmbeddedEditorInstance {
     panel.innerHTML = `
       <div class="diagnostics-header">
         <span class="diagnostics-title">Problems</span>
-        <span class="embedded-diag-count diagnostics-count">0 errors, 0 warnings</span>
+        <span class="algator-diag-count diagnostics-count">0 errors, 0 warnings</span>
       </div>
-      <div class="embedded-diag-list diagnostics-list">
+      <div class="algator-diag-list diagnostics-list">
         <div class="diagnostics-empty">Ni zaznanih napak.</div>
       </div>`;
     container.appendChild(panel);
     this._diagPanel = panel;
-    this._diagList  = panel.querySelector(".embedded-diag-list");
-    this._diagCount = panel.querySelector(".embedded-diag-count");
+    this._diagList  = panel.querySelector(".algator-diag-list");
+    this._diagCount = panel.querySelector(".algator-diag-count");
   }
 
   // ── CodeMirror ───────────────────────────────────────────────────────
@@ -2342,18 +2302,110 @@ class EmbeddedEditorInstance {
       extraKeys: {
         "Ctrl-Space": () => this._requestCompletion(null),
         "Ctrl-S":     () => { /* brez autosave v mode 3 */ },
-        "Esc":        () => this.cm.closeHint?.()
+        "Esc":        () => { this._hideSignatureHint(); this.cm.closeHint?.(); },
+
+        "Left": (cm) => {
+          cm.execCommand("goCharLeft");
+          if (cm.state.completionActive) {
+            clearTimeout(this._compTimer);
+            this._compTimer = setTimeout(() => {
+              const { prefix } = this._typedPrefix();
+              if (prefix.length >= 1) this._requestCompletion(null);
+              else cm.closeHint?.();
+            }, 60);
+          }
+        },
+
+        "Right": (cm) => {
+          cm.execCommand("goCharRight");
+          if (cm.state.completionActive) {
+            clearTimeout(this._compTimer);
+            this._compTimer = setTimeout(() => {
+              const { prefix } = this._typedPrefix();
+              if (prefix.length >= 1) this._requestCompletion(null);
+              else cm.closeHint?.();
+            }, 60);
+          }
+        }
       }
     });
     this.cm.setSize("100%", "100%");
     updateEditorLanguageClass(this._modeStr(this.language));
 
+    this.cm.getWrapperElement().addEventListener("keydown", (e) => {
+      const hint = this.cm.state.completionActive;
+      if (!hint) return;
+
+      const w = hint.widget;
+      if (!w) return;
+
+      if (e.key === "ArrowDown" || e.key === "Down") {
+        e.preventDefault();
+        e.stopPropagation();
+        w.changeActive(w.selectedHint + 1);
+      } else if (e.key === "ArrowUp" || e.key === "Up") {
+        e.preventDefault();
+        e.stopPropagation();
+        w.changeActive(w.selectedHint - 1);
+      } else if (e.key === "PageDown") {
+        e.preventDefault();
+        e.stopPropagation();
+        w.changeActive(w.selectedHint + (w.screenAmount?.() || 5) - 1, true);
+      } else if (e.key === "PageUp") {
+        e.preventDefault();
+        e.stopPropagation();
+        w.changeActive(w.selectedHint - (w.screenAmount?.() || 5) + 1, true);
+      } else if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault();
+        e.stopPropagation();
+        w.pick();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        hint.close();
+        this._hideSignatureHint();
+      }
+    }, true);
+
+    this.cm.on("cursorActivity", () => {
+      clearTimeout(this._sigTimer);
+
+      this._sigTimer = setTimeout(() => {
+        if (!this._lspReady()) {
+          this._hideSignatureHint();
+          return;
+        }
+
+        if (this._callDepth() > 0) {
+          this._requestSignatureHelp(null, true);
+        } else {
+          this._hideSignatureHint();
+        }
+      }, 120);
+    });
+
         this.cm.on("change", (_cm, ch) => {
       if (ch.origin === "setValue") return;
+
       this._notifyLspChange();
-      if (this.savePath) {
-        clearTimeout(this._saveTimer);
-        this._saveTimer = setTimeout(() => this._saveToWorkspace(), CFG.editor.autosaveDelay ?? 1500);
+
+      clearTimeout(this._saveTimer);
+      this._saveTimer = setTimeout(() => this._saveToAlgator(), CFG.editor.autosaveDelay ?? 1500);
+
+      if (ch.origin === "+delete") {
+        clearTimeout(this._compTimer);
+
+        const { prefix } = this._typedPrefix();
+
+        if (this.cm.state.completionActive || prefix.length >= 1) {
+          this._compTimer = setTimeout(() => this._requestCompletion(null), 120);
+        }
+
+        if (this._callDepth() > 0) {
+          this._scheduleSignatureRefresh(null, true, 120);
+        } else {
+          this._hideSignatureHint();
+        }
       }
     });
 
@@ -2378,13 +2430,30 @@ class EmbeddedEditorInstance {
       if (ch === ":" && cur.ch >= 2 && line[cur.ch - 2] === ":") {
         this._schedComp(":", CFG.editor.completionDelay); return;
       }
+
+      if (ch === "(") {
+        if (this.cm.state.completionActive) this.cm.closeHint?.();
+        this._scheduleSignatureRefresh("(", false, 80);
+        return;
+      }
+
+      if (ch === ",") {
+        this._scheduleSignatureRefresh(",", true, CFG.editor.completionDelay);
+        return;
+      }
+
+      if (ch === ")") {
+        clearTimeout(this._sigTimer);
+        this._sigTimer = setTimeout(() => {
+          if (this._callDepth() <= 0) this._hideSignatureHint();
+          else this._scheduleSignatureRefresh(null, true, 0);
+        }, 50);
+        return;
+      }
+
       // Identifier
       if (/^[A-Za-z0-9_$]$/.test(ch)) {
         this._schedComp(null, CFG.editor.identifierDelay);
-      }
-      if (change.origin === "+delete") {
-        const { prefix } = this._typedPrefix();
-        if (prefix.length >= 1) this._schedComp(null, 100);
       }
     });
   }
@@ -2394,7 +2463,7 @@ class EmbeddedEditorInstance {
     this._compTimer = setTimeout(() => this._requestCompletion(triggerChar), delay);
   }
 
-  // ── LSP komunikacija ─────────────────────────────────────────────────
+  //LSP com
   _isJava() { return this.language === "java"; }
 
   _lspRequest(method, params) {
@@ -2440,7 +2509,128 @@ class EmbeddedEditorInstance {
     });
   }
 
-  // ── Completion ───────────────────────────────────────────────────────
+  //Signature help
+  _showSignatureHint(html) {
+    if (!html) {
+      this._hideSignatureHint();
+      return;
+    }
+
+    if (!this._sigEl) {
+      this._sigEl = document.createElement("div");
+      this._sigEl.className = "cm-signature-hint";
+      document.body.appendChild(this._sigEl);
+    }
+
+    this._sigEl.innerHTML = html;
+    this._sigEl.style.display = "block";
+
+    requestAnimationFrame(() => {
+      if (!this._sigEl || !this.cm) return;
+      const cur = this.cm.getCursor();
+      const coords = this.cm.charCoords({ line: cur.line, ch: cur.ch }, "window");
+      this._sigEl.style.left = Math.max(4, coords.left) + "px";
+      this._sigEl.style.top = (coords.top - this._sigEl.offsetHeight - 8) + "px";
+    });
+  }
+
+  _hideSignatureHint() {
+    if (this._sigEl) this._sigEl.style.display = "none";
+  }
+
+  _callDepth() {
+    if (!this.cm) return 0;
+
+    const cur = this.cm.getCursor();
+    const before = (this.cm.getLine(cur.line) || "").slice(0, cur.ch);
+    let depth = 0;
+    let inStr = false;
+    let strCh = "";
+
+    for (const ch of before) {
+      if (inStr) {
+        if (ch === strCh) inStr = false;
+        continue;
+      }
+
+      if (ch === '"' || ch === "'") {
+        inStr = true;
+        strCh = ch;
+        continue;
+      }
+
+      if (ch === "(") depth++;
+      else if (ch === ")" && depth > 0) depth--;
+    }
+
+    return depth;
+  }
+
+  _scheduleSignatureRefresh(triggerChar, isRetrigger, delay) {
+    clearTimeout(this._sigTimer);
+    this._sigTimer = setTimeout(() => {
+      if (this._callDepth() > 0) this._requestSignatureHelp(triggerChar, isRetrigger);
+      else this._hideSignatureHint();
+    }, delay ?? CFG.editor.completionDelay);
+  }
+
+  _requestSignatureHelp(triggerChar, isRetrigger) {
+    if (!this._lspReady()) return;
+
+    const cur = this.cm.getCursor();
+
+    this._lspRequest("textDocument/signatureHelp", {
+      textDocument: { uri: this.uri },
+      position: { line: cur.line, character: cur.ch },
+      context: {
+        triggerKind: triggerChar ? 2 : 1,
+        isRetrigger: isRetrigger ?? false,
+        triggerCharacter: triggerChar || undefined
+      }
+    })
+      .then(result => {
+        if (!result?.signatures?.length) {
+          this._hideSignatureHint();
+          return;
+        }
+
+        const sig = result.signatures[result.activeSignature ?? 0];
+        if (!sig) {
+          this._hideSignatureHint();
+          return;
+        }
+
+        const paramIdx = result.activeParameter ?? sig.activeParameter ?? 0;
+        const params = sig.parameters || [];
+        let label = escapeHtmlBasic(sig.label);
+
+        if (params[paramIdx]) {
+          const p = params[paramIdx];
+          let pLabel, pStart, pEnd;
+
+          if (Array.isArray(p.label)) {
+            [pStart, pEnd] = p.label;
+            pLabel = sig.label.slice(pStart, pEnd);
+          } else {
+            pLabel = p.label;
+            pStart = sig.label.indexOf(pLabel);
+            pEnd = pStart + pLabel.length;
+          }
+
+          if (pStart >= 0) {
+            label =
+              escapeHtmlBasic(sig.label.slice(0, pStart)) +
+              "<strong>" + escapeHtmlBasic(pLabel) + "</strong>" +
+              escapeHtmlBasic(sig.label.slice(pEnd));
+          }
+        }
+
+        this._showSignatureHint(label);
+      })
+      .catch(() => {});
+  }
+
+  //Completion
   _typedPrefix() {
     const cur  = this.cm.getCursor();
     const line = this.cm.getLine(cur.line) || "";
@@ -2528,6 +2718,7 @@ class EmbeddedEditorInstance {
                   cm.replaceRange(getFunctionName(item) + "()", from, to, "complete");
                   const p = cm.getCursor();
                   cm.setCursor({ line: p.line, ch: p.ch - 1 });
+                  setTimeout(() => self._requestSignatureHelp("(", false), 60);
                 } else {
                   cm.replaceRange(getInsertText(item) || item.label, from, to, "complete");
                 }
@@ -2545,7 +2736,7 @@ class EmbeddedEditorInstance {
     }).catch(() => {});
   }
 
-  // ── Diagnostike ──────────────────────────────────────────────────────
+  //Diagnostike
   _clearDiagMarks() {
     this._marks.forEach(m => { try { m.clear(); } catch {} });
     this._marks = [];
@@ -2625,7 +2816,7 @@ class EmbeddedEditorInstance {
     }
   }
 
-  // ── LSP connect + folder context ────────────────────────────────────
+  //LSP connect + folder context
   _connectLsp() {
         const onDiag = this._isJava() ? onJavaLspDiagnostics : onLspDiagnostics;
     onDiag(params => {
@@ -2649,7 +2840,6 @@ class EmbeddedEditorInstance {
     onOpen(() => activate());
   }
 
-  // Odpre vse kontekstualne datoteke iz podane mape v LSP
   async _openFolderContext() {
     if (!hasServerSupport() || !this.folder) return;
     try {
@@ -2679,11 +2869,11 @@ class EmbeddedEditorInstance {
         } catch {}
       }
     } catch (e) {
-      console.warn("[EmbeddedMode] folder context failed:", e.message);
+      console.warn("[AlgatorMode] folder context failed:", e.message);
     }
   }
 
-  // ── Javni API ────────────────────────────────────────────────────────
+  //Public API
   setContent(code, language) {
         if (language && language !== this.language) {
       this.language = language;
@@ -2707,20 +2897,20 @@ class EmbeddedEditorInstance {
       });
     }
 
-    // Sinhroniziraj začetno vsebino v workspace in target-root
+    // Sinhronization of workspace folder and algator-root
     if (hasServerSupport()) {
       clearTimeout(this._saveTimer);
-      this._saveTimer = setTimeout(() => this._saveToWorkspace(), 300);
+      this._saveTimer = setTimeout(() => this._saveToAlgator(), 300);
     }
   }
 
-  async _saveToWorkspace() {
+  async _saveToAlgator() {
     if (!hasServerSupport()) return;
     const content = this.cm.getValue();
 
     try {
       await fetch(
-        `${CFG.server.httpUrl}/workspace/${escapePathSegment(this.virtualFile)}`,
+        `${CFG.server.httpUrl}/workspace/${encodeURIComponent(this.virtualFile)}`,
         { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: content }
       );
     } catch (e) {
@@ -2763,12 +2953,17 @@ class EmbeddedEditorInstance {
         if (this._lspReady()) {
       this._lspNotify("textDocument/didClose", { textDocument: { uri: this.uri } });
     }
+    this._hideSignatureHint();
+    this._sigEl?.remove?.();
+    this._sigEl = null;
     this._clearDiagMarks();
     this.cm.toTextArea();
   }
 }
 
-// ── Globalni factory ─────────────────────────────────────────────────────
-window.createTargetEditor = function(containerEl, opts = {}) {
-  return new EmbeddedEditorInstance(containerEl, opts);
+//Global
+window.createEmbeddedEditor = function(containerEl, opts = {}) {
+  return new AlgatorInstance(containerEl, opts);
 };
+
+window.createAlgatorEditor = window.createEmbeddedEditor;

@@ -173,8 +173,10 @@ window.smartCodeEditor = (() => {
     }
 
     initEmbeddedEditorMode() {
-      const initEmbeddedEditor = async () => {
-        if (typeof window.createEmbeddedEditor !== "function") {
+      const initEmbeddedEditor = () => {
+        const factory = window.createEmbeddedEditor || window.createTargetEditor;
+
+        if (typeof factory !== "function") {
           setTimeout(initEmbeddedEditor, 50);
           return;
         }
@@ -188,26 +190,45 @@ window.smartCodeEditor = (() => {
 
         if (!root.style.height) root.style.height = "100%";
 
-        this.embeddedEditorInstance = window.createEmbeddedEditor(root, {
+        const initialContent =
+          Object.prototype.hasOwnProperty.call(this.options, "content")
+            ? this.options.content
+            : this.options.initialContent;
+
+        this.embeddedEditorInstance = factory(root, {
           language:        this.options.language || "java",
           folder:          this.options.folder   || this.options.project || null,
           syncRoot:        this.syncRoot,
           lsyncEnabled:    this.lsyncEnabled,
           savePath:        this.options.savePath || null,
-          showDiagnostics: this.showDiagnostics
+          showDiagnostics: this.showDiagnostics,
+          content:         initialContent
         });
 
-        await this.embeddedEditorInstance.whenReady();
         this.readyState = true;
+
+        // Safety fallback: also apply content from the API wrapper.
+        if (initialContent !== undefined) {
+          this.embeddedEditorInstance.setContent(
+            initialContent ?? "",
+            this.options.language || "java"
+          );
+        }
 
         if (this.pendingContent !== undefined) {
           this.embeddedEditorInstance.setContent(
             this.pendingContent ?? "",
-            this.pendingLanguage
+            this.pendingLanguage || this.options.language || "java"
           );
+
           this.pendingContent  = undefined;
           this.pendingLanguage = undefined;
         }
+
+        setTimeout(() => {
+          this.embeddedEditorInstance?.refresh?.();
+          this.embeddedEditorInstance?.focus?.();
+        }, 100);
       };
 
       if (document.readyState === "loading") {
@@ -436,6 +457,7 @@ window.smartCodeEditor = (() => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             syncRoot: this.syncRoot,
+            folder: this.options.folder || "",
             lsyncEnabled: this.lsyncEnabled
           })
         });
