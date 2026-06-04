@@ -1,0 +1,59 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>SmartCode — Choose a Mode</title>
+  
+  <link rel="stylesheet" href="codemirror/lib/codemirror.css">
+  <link rel="stylesheet" href="codemirror/theme/eclipse.css">
+  <link rel="stylesheet" href="codemirror/addon/hint/show-hint.css">
+  <link rel="stylesheet" href="css/index.css">
+  <link rel="stylesheet" href="css/editorStyle.css">
+</head>
+<body>
+
+<header>
+  <h1>SmartCode Editor</h1>
+  <p>Choose how you want to use the code editor.</p>
+</header>
+
+<main>
+  <div class="card">
+    <h2>PROJECT Mode</h2>
+    <p>
+      A full editor with a toolbar, file tabs, status bar,
+      diagnostics and support for multiple files. This mode is suitable
+      for using the editor as a standalone project environment.
+    </p>
+    <a href="editor-project.html">Open PROJECT Mode</a>
+  </div>
+
+  <div class="card">
+    <h2>FOLDER Mode</h2>
+    <p>
+      Opens a folder picker on startup. The user selects a local folder,
+      and the editor loads files from that folder and its subfolders.
+      This mode is suitable for working with an existing project.
+    </p>
+    <a href="editor-folder.html">Open FOLDER Mode</a>
+  </div>
+
+  <div class="card">
+    <h2>SINGLE Mode</h2>
+    <p>
+      An embedded editor without file tabs and toolbar. This mode is intended
+      for integrating the editor into another web application, for example ALGator.
+    </p>
+    <a href="editor-single.html">Open SINGLE Mode</a>
+  </div>
+</main>
+
+<div class="note">
+  Before using the editor, make sure that the Docker LSP server is running at
+  <strong>http://localhost:3000</strong>.
+</div>
+
+</body>
+</html>
+```

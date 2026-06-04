@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+  <meta charset="UTF-8">
+  <title>SmartCode • SINGLE</title>
+  <link rel="icon" href="img/smartCodeLogo2.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="codemirror/lib/codemirror.css">
+  <link rel="stylesheet" href="codemirror/theme/eclipse.css">
+  <link rel="stylesheet" href="codemirror/addon/hint/show-hint.css">
+  <link rel="stylesheet" href="css/editorStyle.css">
+  <link rel="stylesheet" href="css/editroSingle.css">
+</head>
+<body>
+
+<header>
+  <div>SmartCode — SINGLE mode</div>
+  <a href="index.html">Back</a>
+</header>
+
+<div class="page">
+  <div class="editor-card">
+    <div class="editor-title">Main.java</div>
+    <div id="singleEditor"></div>
+  </div>
+</div>
+
+<script src="codemirror/lib/codemirror.js"></script>
+<script src="codemirror/mode/clike/clike.js"></script>
+<script src="codemirror/addon/edit/matchbrackets.js"></script>
+<script src="codemirror/addon/edit/closebrackets.js"></script>
+<script src="codemirror/addon/hint/show-hint.js"></script>
+
+<script src="js/config.js"></script>
+<script src="langserver/js/lspClient.js"></script>
+<script src="js/smartCodeEditor.js"></script>
+<script src="js/editorMain.js"></script>
+
+<script>
+  var ed = smartCodeEditor.initEditor(
+    "singleEditor",
+    false,
+    false,
+    true,
+    smartCodeEditor.editorMode.SINGLE,
+    {
+      language: "java",
+      folder: "single/src",
+      savePath: "single/src/Main.java",
+      syncRoot: "single",
+      lsyncEnabled: true,
+
+      content: `public class Main {
+    public static void main(String[] args) {
+        System.out.prinf("test");
+    }
+}`
+    }
+  );
+
+  window.smartCodeEditorInstance = ed;
+</script>
+
+</body>
+</html>

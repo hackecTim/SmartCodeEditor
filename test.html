@@ -38,9 +38,9 @@
   <h1>SmartCode — test</h1>
 
   <div class="tabs">
-    <button class="tab-btn active" onclick="showTab('java')">Java</button>
-    <button class="tab-btn" onclick="showTab('c')">C / C++</button>
-    <button class="tab-btn" onclick="showTab('multi')">Več editorjev</button>
+    <button class="tab-btn active" onclick="showTab('java', event)">Java</button>
+    <button class="tab-btn" onclick="showTab('c', event)">C / C++</button>
+    <button class="tab-btn" onclick="showTab('multi', event)">Več editorjev</button>
   </div>
 
   <!-- TAB: Java -->
@@ -73,17 +73,17 @@
 
   <!-- TAB: Več editorjev -->
   <div id="tab-multi" class="tab-content">
-    <p style="color:#475569;font-size:14px;margin:0 0 16px">Simulacija  3 neodvisni urejevalniki na isti strani. Vsak ima svojo vsebino in diagnostike.</p>
+    <p style="color:#475569;font-size:14px;margin:0 0 16px">Test 3 urejevalnikov. Prva dva Java urejevalnika sta v isti LSP mapi, zato mora JDTLS javiti napako, če Main kliče metodo, ki je v Helper ni.</p>
     <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
       <div>
         <div class="editor-box">
-          <div class="label">BubbleSort.java</div>
+          <div class="label">Main.java</div>
           <div id="ed-m1" class="editor-slot" style="height:280px;"></div>
         </div>
       </div>
       <div>
         <div class="editor-box">
-          <div class="label">QuickSort.java</div>
+          <div class="label">Helper.java</div>
           <div id="ed-m2" class="editor-slot" style="height:280px;"></div>
         </div>
       </div>
@@ -116,15 +116,43 @@
 
     // Inicializacija editorjev 
 
-    var edJava = smartCodeEditor.initEditor("ed-java", false, false, true, SINGLE, { language: "java" });
-    var edC    = smartCodeEditor.initEditor("ed-c",    false, false, true, SINGLE, { language: "c" });
+    var edJava = smartCodeEditor.initEditor("ed-java", false, false, true, SINGLE, {
+      language: "java",
+      folder: "test",
+      savePath: "test/Main.java",
+      lsyncEnabled: false
+    });
 
-    var edM1 = smartCodeEditor.initEditor("ed-m1", false, false, true, SINGLE, { language: "java" });
-    var edM2 = smartCodeEditor.initEditor("ed-m2", false, false, true, SINGLE, { language: "java" });
-    var edM3 = smartCodeEditor.initEditor("ed-m3", false, false, true, SINGLE, { language: "c" });
+    var edC = smartCodeEditor.initEditor("ed-c", false, false, true, SINGLE, {
+      language: "c",
+      folder: "test",
+      savePath: "test/main.c",
+      lsyncEnabled: false
+    });
+
+    var edM1 = smartCodeEditor.initEditor("ed-m1", false, false, true, SINGLE, {
+      language: "java",
+      folder: "test/multi",
+      savePath: "test/multi/Main.java",
+      lsyncEnabled: false
+    });
+
+    var edM2 = smartCodeEditor.initEditor("ed-m2", false, false, true, SINGLE, {
+      language: "java",
+      folder: "test/multi",
+      savePath: "test/multi/Helper.java",
+      lsyncEnabled: false
+    });
+
+    var edM3 = smartCodeEditor.initEditor("ed-m3", false, false, true, SINGLE, {
+      language: "c",
+      folder: "test/multi",
+      savePath: "test/multi/utils.c",
+      lsyncEnabled: false
+    });
 
     edJava.whenReady().then(() => {
-      document.getElementById("status-java").textContent = "✓ LSP ready";
+      document.getElementById("status-java").textContent = "✓ editor ready";
       edJava.setContent(
 `public class Main {
 
@@ -135,7 +163,7 @@
     });
 
     edC.whenReady().then(() => {
-      document.getElementById("status-c").textContent = "✓ LSP ready";
+      document.getElementById("status-c").textContent = "✓ editor ready";
       edC.setContent(
 `#include <stdio.h>
 
@@ -146,31 +174,18 @@ int main(void) {
     });
 
     edM1.whenReady().then(() => edM1.setContent(
-`public class BubbleSort {
-    public static void sort(int[] a) {
-        for (int i = 0; i < a.length - 1; i++)
-            for (int j = 0; j < a.length - i - 1; j++)
-                if (a[j] > a[j+1]) {
-                    int t = a[j]; a[j] = a[j+1]; a[j+1] = t;
-                }
+`public class Main {
+    public static void main(String[] args) {
+        Helper helper = new Helper();
+        int x = helper.add(2, 3);
+        System.out.println(x);
     }
 }`));
 
     edM2.whenReady().then(() => edM2.setContent(
-`public class QuickSort {
-    public static void sort(int[] a, int lo, int hi) {
-        if (lo < hi) {
-            int p = partition(a, lo, hi);
-            sort(a, lo, p - 1);
-            sort(a, p + 1, hi);
-        }
-    }
-    private static int partition(int[] a, int lo, int hi) {
-        int pivot = a[hi], i = lo - 1;
-        for (int j = lo; j < hi; j++)
-            if (a[j] <= pivot) { int t = a[++i]; a[i] = a[j]; a[j] = t; }
-        int t = a[i+1]; a[i+1] = a[hi]; a[hi] = t;
-        return i + 1;
+`public class Helper {
+    public int add2(int a, int b) {
+        return a + b;
     }
 }`));
 
@@ -205,10 +220,10 @@ int main(void) {
 
     function testMultiRead() {
       document.getElementById("out-multi").textContent =
-        "BubbleSort.java  → " + edM1.getContent().length + " znakov\n" +
-        "QuickSort.java   → " + edM2.getContent().length + " znakov\n" +
+        "Main.java    → " + edM1.getContent().length + " znakov\n" +
+        "Helper.java  → " + edM2.getContent().length + " znakov\n" +
         "utils.c          → " + edM3.getContent().length + " znakov\n\n" +
-        "Vsi editorji delajo neodvisno.";
+        "Če Helper vsebuje add2, Main pa kliče add, mora JDTLS javiti napako v Main.java.";
     }
 
     function testMultiSet() {
@@ -220,11 +235,11 @@ int main(void) {
 
     // ── Tab navigacija ────────────────────────────────────────────────
 
-    function showTab(name) {
+    function showTab(name, ev) {
       document.querySelectorAll(".tab-content").forEach(el => el.classList.remove("active"));
       document.querySelectorAll(".tab-btn").forEach(el => el.classList.remove("active"));
       document.getElementById("tab-" + name).classList.add("active");
-      event.target.classList.add("active");
+      ev?.target?.classList.add("active");
 
       // Refresh editorjev ko postanejo vidni
       setTimeout(() => {
