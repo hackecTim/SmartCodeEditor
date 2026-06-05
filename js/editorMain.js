@@ -2199,7 +2199,7 @@ function setAutosaveInfo(t, c) {
    language        "java" | "c" | "cpp"  (privzeto: "java")
    folder          relativna podmapa workspace za LSP kontekst (opcijsko)
   showDiagnostics true/false (privzeto: true)
-*/ ═══════════════════════════════════════════════════════════════════════════
+*/
 
 let _algatorIdCounter = 0;
 
