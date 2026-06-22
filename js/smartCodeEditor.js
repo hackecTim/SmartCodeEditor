@@ -7,7 +7,7 @@
 // MODE FOLDER  (odpre direktorij kot projekt):
 //   var ed = smartCodeEditor.initEditor("editorDiv", true, true, true, smartCodeEditor.editorMode.FOLDER);
 //
-// MODE SINGLE  (vgrajen enodatotečni urejevalnik, brez zavihkov, brez autosave):
+// MODE SINGLE:
 //   var ed = smartCodeEditor.initEditor("div", false, false, true, smartCodeEditor.editorMode.SINGLE, {
 //     language: "java",   // "java" | "c" | "cpp"
 //     folder:   "mylib"   // relativna podmapa workspace za LSP kontekst (opcijsko)
@@ -16,14 +16,14 @@
 //     ed.setContent("public class X { }", "java");
 //     console.log(ed.getContent());
 //   });
-// ═══════════════════════════════════════════════════════════════════════
+//
 
 window.smartCodeEditor = (() => {
 
   const editorMode = Object.freeze({
-    PROJECT: "project",   // Večdatotečni urejevalnik s projekti in zavihki
-    FOLDER:  "folder",    // Odpre direktorij kot projekt
-    SINGLE:  "single"     // Izoliran urejevalnik brez zavihkov (ciljne)
+    PROJECT: "project", 
+    FOLDER:  "folder",    
+    SINGLE:  "single"     
   });
 
   const _modeMap = { project: 1, folder: 2, single: 3 };
@@ -125,7 +125,7 @@ window.smartCodeEditor = (() => {
       this.options          = options || {};
       this.syncRoot         = Object.prototype.hasOwnProperty.call(this.options, "syncRoot")
         ? (this.options.syncRoot || "")
-        : (this.options.folder || "");
+        : (this.options.projectFolder || this.options.folder || "");
       this.lsyncEnabled     = this.options.lsyncEnabled === true;
       this.options.syncRoot = this.syncRoot;
       this.options.lsyncEnabled = this.lsyncEnabled;
@@ -197,7 +197,8 @@ window.smartCodeEditor = (() => {
 
         this.embeddedEditorInstance = factory(root, {
           language:        this.options.language || "java",
-          folder:          this.options.folder   || this.options.project || null,
+          projectFolder:   this.options.projectFolder || this.options.folder || this.options.project || null,
+          folder:          this.options.folder || this.options.projectFolder || this.options.project || null,
           syncRoot:        this.syncRoot,
           lsyncEnabled:    this.lsyncEnabled,
           savePath:        this.options.savePath || null,
@@ -207,7 +208,6 @@ window.smartCodeEditor = (() => {
 
         this.readyState = true;
 
-        // Safety fallback: also apply content from the API wrapper.
         if (initialContent !== undefined) {
           this.embeddedEditorInstance.setContent(
             initialContent ?? "",
@@ -262,7 +262,6 @@ window.smartCodeEditor = (() => {
             <button id="newFileBtn"     class="btn-secondary" type="button">New File</button>
             <button id="openBtn"        class="btn-secondary" type="button">Open Files</button>
             <button id="openFolderBtn"  class="btn-secondary" type="button">Open Project</button>
-            <button id="demoProjectBtn" class="btn-secondary" type="button">Open Demo Project</button>
             <button id="saveBtn"        class="btn-primary"   type="button">Save</button>
             <input  id="fileInput" type="file" multiple hidden />
           </div>
@@ -406,7 +405,7 @@ window.smartCodeEditor = (() => {
       }
     }
 
-    // ── Javni API ────────────────────────────────────────────────────────
+    //Public API
 
     async openProject(project) {
       if (this.mode === 3) { console.warn("[smartCodeEditor] openProject ni na voljo v SINGLE načinu"); return; }

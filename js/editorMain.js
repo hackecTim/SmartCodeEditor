@@ -30,9 +30,6 @@ let browserPersistenceEnabled = false;
 
 const DEBUG_LSP = false;
 
-// Helperji
-
-
 function debugLog(...args) {
   if (DEBUG_LSP) console.log(...args);
 }
@@ -273,7 +270,6 @@ function ensureFileState(filename, extra = {}) {
   return fileStates.get(key);
 }
 
-//Docstate iz aktivne datoteke
 function docState() {
   const st = fileStates.get(activeFile);
   if (!st) return { uri: "", languageId: "plaintext", version: 1 };
@@ -427,9 +423,7 @@ async function notifyServerFileChange(filename, type = 2) {
 
 async function setServerSyncRoot(syncRoot) {
   if (!hasServerSupport()) return false;
-
   const root = normalizePath(syncRoot || "").replace(/\/+$/, "");
-
   try {
     const res = await fetch(`${CFG.server.httpUrl}/sync-root`, {
       method: "POST",
@@ -439,6 +433,25 @@ async function setServerSyncRoot(syncRoot) {
     return res.ok;
   } catch (e) {
     console.warn("setServerSyncRoot failed:", e.message);
+    return false;
+  }
+}
+
+async function setServerProjectFolder(projectFolder) {
+  if (!hasServerSupport()) return false;
+  const folder = normalizePath(projectFolder || "").replace(/\/+$/, "");
+  try {
+    const res = await fetch(`${CFG.server.httpUrl}/project-folder`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectFolder: folder })
+    });
+    if (res.ok) {
+      console.log("[editor] project-folder nastavljen:", folder || "(cel lsync-root)");
+    }
+    return res.ok;
+  } catch (e) {
+    console.warn("setServerProjectFolder failed:", e.message);
     return false;
   }
 }
@@ -574,7 +587,6 @@ function getFunctionName(item) {
   return m ? m[1] : clean.split("(")[0].trim();
 }
 
-// Vrne ikono in barvo glede na LSP completion item kind
 function getKindInfo(kind) {
   switch (kind) {
     case 1:  return { icon: "⊡", color: "#888" };          // Text
@@ -704,11 +716,14 @@ document.addEventListener("DOMContentLoaded", async () => {
   setServerInfo("LSP: starting…");
 
   if (hasServerSupport()) {
-    const hasExplicitSyncRoot = Object.prototype.hasOwnProperty.call(window.smartCodeInitialOptions || {}, "syncRoot");
-    const syncRoot = hasExplicitSyncRoot
-      ? (window.smartCodeInitialOptions?.syncRoot || "")
-      : (window.smartCodeInitialOptions?.folder || "");
-    setServerSyncRoot(syncRoot);
+    const opts = window.smartCodeInitialOptions || {};
+    if (opts.projectFolder) {
+      setServerProjectFolder(opts.projectFolder);
+    } else {
+      const hasExplicitSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
+      const syncRoot = hasExplicitSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
+      setServerSyncRoot(syncRoot);
+    }
 
     initClangdLsp();
     initJavaLsp();
@@ -950,7 +965,12 @@ async function refreshFileList({ openFirst = false, includeServerWorkspace = fal
 
   if (includeServerWorkspace && hasServerSupport()) {
     try {
-      const scanFolder = normalizePath(window.smartCodeInitialOptions?.folder || window.smartCodeInitialOptions?.syncRoot || "");
+      const scanFolder = normalizePath(
+        window.smartCodeInitialOptions?.projectFolder ||
+        window.smartCodeInitialOptions?.folder ||
+        window.smartCodeInitialOptions?.syncRoot ||
+        ""
+      );
       const scanUrl = scanFolder
         ? `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(scanFolder)}`
         : `${CFG.server.httpUrl}/scan`;
@@ -1357,6 +1377,12 @@ async function renameFile(filename) {
 
 // UI buttons
 function initUI() {
+
+  if (!document.getElementById("newFileBtn")) {
+    setTimeout(initUI, 50);
+    return;
+  }
+
   document.getElementById("newFileBtn")?.addEventListener("click", createNewFile);
   document.getElementById("demoProjectBtn")?.addEventListener("click", openDemoProject);
   document.getElementById("saveBtn")?.addEventListener("click", () => saveActiveFile(false));
@@ -2218,8 +2244,9 @@ class AlgatorInstance {
   constructor(containerEl, opts = {}) {
     this.id       = _algatorIdCounter++;
     this.language = opts.language || "java";
-    this.folder   = opts.folder   || null;
-    this.syncRoot = opts.syncRoot || null;
+    this.projectFolder = opts.projectFolder || opts.folder || opts.project || null;
+    this.folder   = opts.folder || this.projectFolder || null;
+    this.syncRoot = opts.syncRoot || this.projectFolder || null;
     this.savePath = opts.savePath || null;
     this._showDiagnostics = opts.showDiagnostics !== false;
     this._marks   = [];
@@ -2243,11 +2270,15 @@ class AlgatorInstance {
   }
 
   _updateVirtualFile() {
+    const folder = normalizePath(this.projectFolder || this.folder || this.syncRoot || "").replace(/\/+$/, "");
+
     if (this.savePath) {
-      this.virtualFile = normalizePath(this.savePath);
+      const save = normalizePath(this.savePath);
+      this.virtualFile = folder && !save.startsWith(folder + "/")
+        ? `${folder}/${save}`
+        : save;
     } else {
       const ext = this._extensionForLanguage(this.language);
-      const folder = normalizePath(this.folder || this.syncRoot || "").replace(/\/+$/, "");
       const name = `embedded_${this.id}${ext}`;
       this.virtualFile = folder ? `${folder}/${name}` : name;
     }
@@ -2282,7 +2313,7 @@ class AlgatorInstance {
     this._diagCount = panel.querySelector(".algator-diag-count");
   }
 
-  // ── CodeMirror ───────────────────────────────────────────────────────
+  //CodeMirror
   _modeStr(lang) {
     return { java: "text/x-java", c: "text/x-csrc", cpp: "text/x-c++src" }[lang] || "text/x-java";
   }
@@ -2736,7 +2767,7 @@ class AlgatorInstance {
     }).catch(() => {});
   }
 
-  //Diagnostike
+  //Diagnostics
   _clearDiagMarks() {
     this._marks.forEach(m => { try { m.clear(); } catch {} });
     this._marks = [];
@@ -2841,9 +2872,10 @@ class AlgatorInstance {
   }
 
   async _openFolderContext() {
-    if (!hasServerSupport() || !this.folder) return;
+    const folder = normalizePath(this.projectFolder || this.folder || this.syncRoot || "");
+    if (!hasServerSupport() || !folder) return;
     try {
-      const url = `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(this.folder)}`;
+      const url = `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(folder)}`;
       const res = await fetch(url);
       if (!res.ok) return;
       const { files } = await res.json();
@@ -2897,7 +2929,7 @@ class AlgatorInstance {
       });
     }
 
-    // Sinhronization of workspace folder and algator-root
+    // Sinhronization
     if (hasServerSupport()) {
       clearTimeout(this._saveTimer);
       this._saveTimer = setTimeout(() => this._saveToAlgator(), 300);

@@ -7,8 +7,7 @@ const SmartCodeConfig = {
   },
 
   workspace: {
-    // LSP root URI — mora se ujemati s potjo v Dockerju
-    rootUri: "file:///workspace"
+    rootUri: "file:///algator_lsync_root"
   },
 
   editor: {
