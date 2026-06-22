@@ -19,7 +19,7 @@
 
 <div class="page">
   <div class="editor-card">
-    <div class="editor-title">Main.java</div>
+    <div class="editor-title" id="editorTitle">Main.java</div>
     <div id="singleEditor"></div>
   </div>
 </div>
@@ -36,28 +36,41 @@
 <script src="js/editorMain.js"></script>
 
 <script>
-  var ed = smartCodeEditor.initEditor(
-    "singleEditor",
-    false,
-    false,
-    true,
-    smartCodeEditor.editorMode.SINGLE,
-    {
-      language: "java",
-      folder: "single/src",
-      savePath: "single/src/Main.java",
-      syncRoot: "single",
-      lsyncEnabled: true,
+  // Preberi projectFolder iz URL parametra: ?projectFolder=PROJ-BasicSort
+  // ali iz query stringa: ?folder=PROJ-BasicSort
+  (function () {
+    const params = new URLSearchParams(window.location.search);
+    const projectFolder = params.get("projectFolder") || params.get("folder") || "single";
 
-      content: `public class Main {
-    public static void main(String[] args) {
-        System.out.prinf("test");
-    }
-}`
-    }
-  );
+    // Posodobi naslov
+    document.getElementById("editorTitle").textContent =
+      projectFolder + " / Main.java";
 
-  window.smartCodeEditorInstance = ed;
+    // savePath: relativna pot znotraj projectFolder; shrani se v <algator_lsync_root>/<projectFolder>/src/Main.java
+    const savePath   = "src/Main.java";
+    const syncRoot   = projectFolder;
+    const folder     = projectFolder + "/src";
+
+    var ed = smartCodeEditor.initEditor(
+      "singleEditor",
+      false,
+      false,
+      true,
+      smartCodeEditor.editorMode.SINGLE,
+      {
+        language:     "java",
+        folder:       folder,
+        savePath:     savePath,
+        syncRoot:     syncRoot,
+        projectFolder: projectFolder,   // nov parameter → pošlje se na /project-folder
+        lsyncEnabled: false,            // lsync je ločen docker container
+
+        content: `public class Main {\n    public static void main(String[] args) {\n        \n    }\n}`
+      }
+    );
+
+    window.smartCodeEditorInstance = ed;
+  })();
 </script>
 
 </body>

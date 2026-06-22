@@ -25,19 +25,69 @@
   <script src="js/editorMain.js"></script>
 
   <script>
-    var ed = smartCodeEditor.initEditor(
-      "editorDiv",
-      true,
-      true,
-      true,
-      smartCodeEditor.editorMode.FOLDER,
-      {
-        syncRoot: "",
-        lsyncEnabled: true
-      }
-    );
+    (async function () {
+      const params = new URLSearchParams(window.location.search);
 
-    window.smartCodeEditorInstance = ed;
+      // FOLDER način naj se privzeto obnaša kot workspace mapa.
+      // Primer:
+      //   editor-folder.html
+      //     -> prvi projekt iz GET /projects (dejansko stanje algator_lsync_root)
+      //
+      //   editor-folder.html?folder=PROJ-BasicSort
+      //     -> workspace/PROJ-BasicSort
+      let folder = params.get("folder") || params.get("projectFolder") || "";
+
+      if (!folder) {
+        try {
+          const baseUrl =
+            (typeof SmartCodeConfig !== "undefined" && SmartCodeConfig.server?.httpUrl) ||
+            "http://localhost:3000";
+          const res = await fetch(`${baseUrl}/projects`);
+          if (res.ok) {
+            const data = await res.json();
+            folder = (data.projects && data.projects[0]) || "";
+          }
+        } catch (e) {
+          console.warn("Privzetega projekta ni bilo mogoče pridobiti iz /projects:", e.message);
+        }
+      }
+
+      if (!folder) {
+        document.getElementById("editorDiv").innerHTML =
+          '<div style="padding:2rem;color:#900;">' +
+          'V &lt;algator_lsync_root&gt; ni nobenega projekta. ' +
+          'Dodajte projekt v algator_projects/ ali podajte ?folder=IME v URL.' +
+          '</div>';
+        return;
+      }
+
+      var ed = smartCodeEditor.initEditor(
+        "editorDiv",
+        true,
+        true,
+        true,
+        smartCodeEditor.editorMode.FOLDER,
+        {
+          projectFolder: folder,
+          folder: folder,
+          syncRoot: folder,
+          lsyncEnabled: false
+        }
+      );
+
+      window.smartCodeEditorInstance = ed;
+
+      // Ker FOLDER način v obstoječem JS prikaže poziv za izbiro direktorija,
+      // ga tukaj odstranimo in odpremo privzeti workspace projekt.
+      // S tem ni treba spreminjati JS datotek.
+      setTimeout(async () => {
+        document.getElementById("smartcodeDirectoryPrompt")?.remove?.();
+
+        if (ed && typeof ed.openWorkspaceProject === "function") {
+          await ed.openWorkspaceProject();
+        }
+      }, 600);
+    })();
   </script>
 
 </body>

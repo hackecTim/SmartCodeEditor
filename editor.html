@@ -13,6 +13,8 @@
 </head>
 <body>
 
+  <div id="editorDiv" style="height: 100vh;"></div>
+
   <script src="codemirror/lib/codemirror.js"></script>
   <script src="codemirror/mode/clike/clike.js"></script>
   <script src="codemirror/addon/edit/matchbrackets.js"></script>
@@ -23,85 +25,60 @@
   <script src="js/smartCodeEditor.js"></script>
   <script src="js/editorMain.js"></script>
 
-  <div id="editorDiv" style="height: 100vh;"></div>
-
   <script>
-  /*var ed = smartCodeEditor.initEditor(
-  "editorDiv",
-  true,
-  true,
-  true,
-  smartCodeEditor.editorMode.SINGLE,
-  {
-    language: "java",
-    folder: "main/src",
-    syncRoot: ""
-  }
-  
-  primer uporabe 
-  var ed = smartCodeEditor.initEditor(
-  "editorDiv",
-  true,
-  true,
-  true,
-  smartCodeEditor.editorMode.PROJECT,
-  {
-    folder: "project1",
-    syncRoot: "project1",
-    lsyncEnabled: true
-  }
-);
-);*/
-  var ed = smartCodeEditor.initEditor(
-  "editorDiv",
-  true,
-  true,
-  true,
-  smartCodeEditor.editorMode.PROJECT,
-  {
-    syncRoot: "",
-    lsyncEnabled: true
-  }
-);
-  //fOLDER
-   /* var ed = smartCodeEditor.initEditor(
-      "editorDiv",
-      true,
-      true,
-      true,
-      smartCodeEditor.editorMode.PROJECT
-    );
-	
+    (async function () {
+      const params = new URLSearchParams(window.location.search);
 
-    
-	
-	3. NAČIN SINGLE
-	
-	var ed = smartCodeEditor.initEditor(
-  "editorDiv",
-  true,  // showToolbar: prikaže zgornjo orodno vrstico z gumbi New, Open, Save ...
-  true,  // showTabStatusbar: prikaže zavihke datotek in spodnjo statusno vrstico
-  true,  // showDiagnostics: prikaže diagnostiko, napake in opozorila 
-  smartCodeEditor.editorMode.SINGLE,
-  {
-    language: "java",
-    folder: "myproject/src"
-  }
-);
+      // PROJECT način naj privzeto odpira projekt iz <algator_lsync_root>.
+      // Primer:
+      //   editor.html
+      //     -> prvi projekt iz GET /projects (dejansko stanje algator_lsync_root)
+      //
+      //   editor.html?projectFolder=PROJ-BasicSort
+      //     -> algator_lsync_root/PROJ-BasicSort
+      let projectFolder = params.get("projectFolder") || params.get("folder") || "";
 
-ed.whenReady().then(() => {
-  ed.setContent("public class Main { }", "java");
-});
+      if (!projectFolder) {
+        try {
+          const baseUrl =
+            (typeof SmartCodeConfig !== "undefined" && SmartCodeConfig.server?.httpUrl) ||
+            "http://localhost:3000";
+          const res = await fetch(`${baseUrl}/projects`);
+          if (res.ok) {
+            const data = await res.json();
+            projectFolder = (data.projects && data.projects[0]) || "";
+          }
+        } catch (e) {
+          console.warn("Privzetega projekta ni bilo mogoče pridobiti iz /projects:", e.message);
+        }
+      }
 
-var ed = smartCodeEditor.initEditor(
-      "editorDiv",
-      true,
-      true,
-      true,
-      smartCodeEditor.editorMode.PROJECT
-    );
-*/
-	</script>
+      if (!projectFolder) {
+        document.getElementById("editorDiv").innerHTML =
+          '<div style="padding:2rem;color:#900;">' +
+          'V &lt;algator_lsync_root&gt; ni nobenega projekta. ' +
+          'Dodajte projekt v algator_projects/ ali podajte ?projectFolder=IME v URL.' +
+          '</div>';
+        return;
+      }
+
+      var ed = smartCodeEditor.initEditor(
+        "editorDiv",
+        true,
+        true,
+        true,
+        smartCodeEditor.editorMode.PROJECT,
+        {
+          projectFolder: projectFolder,
+          folder: projectFolder,
+          syncRoot: projectFolder,
+          lsyncEnabled: false
+        }
+      );
+
+      window.smartCodeEditorInstance = ed;
+    })();
+  </script>
 
 </body>
 </html>

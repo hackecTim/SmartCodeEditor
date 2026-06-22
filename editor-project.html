@@ -25,6 +25,20 @@
   <script src="js/editorMain.js"></script>
 
   <script>
+    const params = new URLSearchParams(window.location.search);
+
+    // PROJECT način naj privzeto odpira projekt iz workspace mape.
+    // Primer:
+    //   editor-project.html
+    //     -> workspace/PROJ-WorkspaceTest
+    //
+    //   editor-project.html?projectFolder=PROJ-BasicSort
+    //     -> workspace/PROJ-BasicSort
+    const projectFolder =
+      params.get("projectFolder") ||
+      params.get("folder") ||
+      "PROJ-WorkspaceTest";
+
     var ed = smartCodeEditor.initEditor(
       "editorDiv",
       true,
@@ -32,9 +46,10 @@
       true,
       smartCodeEditor.editorMode.PROJECT,
       {
-        folder: "",
-        syncRoot: "",
-        lsyncEnabled: true
+        projectFolder: projectFolder,
+        folder: projectFolder,
+        syncRoot: projectFolder,
+        lsyncEnabled: false
       }
     );
 
