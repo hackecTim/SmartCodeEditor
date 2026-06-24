@@ -1,7 +1,7 @@
 FROM node:20-bookworm
 
-# ── Temurin 21 ────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y wget apt-transport-https gnupg && \
+# Java 21 (za jdtls)
+RUN apt-get update && apt-get install -y wget apt-transport-https gnupg ca-certificates && \
     wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public \
        | gpg --dearmor -o /usr/share/keyrings/adoptium.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb bookworm main" \
@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y wget apt-transport-https gnupg && \
 ENV JAVA_HOME=/usr/lib/jvm/temurin-21-amd64
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-# ── Build tools + clangd ──────────────────────────────────────────────
-RUN apt-get update && apt-get install -y \
+# clangd + osnovna orodja za C/C++
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
     clangd \
     clang \
     cmake \
@@ -21,7 +22,7 @@ RUN apt-get update && apt-get install -y \
     rsync \
     && rm -rf /var/lib/apt/lists/*
 
-# ── jdtls ─────────────────────────────────────────────────────────────
+# jdtls
 ARG JDTLS_VERSION=1.9.0
 ARG JDTLS_DATE=202203031534
 RUN mkdir -p /opt/jdtls && \
@@ -30,21 +31,21 @@ RUN mkdir -p /opt/jdtls && \
     tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls && \
     rm /tmp/jdtls.tar.gz
 
-# ── App ───────────────────────────────────────────────────────────────
 WORKDIR /app
-RUN mkdir -p /algator_lsync_root /workspace /tmp/jdtls-data
+RUN mkdir -p /algator_lsync_root /tmp/jdtls-data
 
-COPY js/package.json js/package-lock.json ./
+COPY js/package.json js/package-lock.json /app/
 RUN npm ci --omit=dev
 
-COPY js/server.js ./
-COPY docker/start.sh ./
-RUN chmod +x /app/start.sh
+COPY js/server.js /app/server.js
+COPY docker/start.sh /app/start.sh
 
-# LSP Docker nima dostopa do <algator_projects>.
-# /algator_lsync_root = LSP/code completion root, ki ga polni lsync.
-# /workspace = delovna mapa PROJECT načina, kamor editor shranjuje spremembe.
-VOLUME ["/algator_lsync_root", "/workspace"]
+# Pomembno za Windows: odstrani CRLF in nastavi pravice.
+RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
+
+# LSP vidi samo sinhronizirano kopijo projektov.
+# Originalne mape <algator_root> ne mountamo v ta container.
+VOLUME ["/algator_lsync_root"]
 
 EXPOSE 3000
-CMD ["/app/start.sh"]
+CMD ["/bin/bash", "/app/start.sh"]
