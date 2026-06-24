@@ -1,18 +1,5 @@
 version: "3.9"
 
-# SmartCode architecture:
-#   <algator_projects>  -> smartcode-lsync -> <algator_lsync_root> -> smartcode-lsp/editor
-#
-# lsync:
-#   - vidi <algator_projects> kot :ro
-#   - piše v <algator_lsync_root>
-#   - gleda CELOTNO mapo <algator_projects>, ne samo odprtega projekta
-#
-# lsp/editor:
-#   - nimata dostopa do <algator_projects>
-#   - LSP za code completion uporablja <algator_lsync_root>
-#   - PROJECT editor za shranjevanje uporablja ločeno workspace mapo
-
 services:
   smartcode-lsync:
     build:
@@ -26,8 +13,8 @@ services:
       LSYNC_POLL_INTERVAL: "1"
       LSYNC_VERBOSE: "1"
     volumes:
-      - ${ALGATOR_PROJECTS}:/algator_projects:ro
-      - ${ALGATOR_LSYNC}:/algator_lsync_root:rw
+      - ${ALGATOR_ROOT}:/algator_projects:ro
+      - smartcode-lsync-root:/algator_lsync_root
 
   smartcode-lsp:
     build:
@@ -40,12 +27,13 @@ services:
       - "3000:3000"
     environment:
       LSYNC_ROOT: /algator_lsync_root
-      WORKSPACE_ROOT: /workspace
       PROJECT_FOLDER: ""
       JDTLS_DATA_DIR: /tmp/jdtls-data
       JAVA_CLASSPATH_REFRESH_MS: "0"
     volumes:
-      - ${ALGATOR_LSYNC}:/algator_lsync_root:rw
-      - ${SMARTCODE_WORKSPACE}:/workspace:rw
+      - smartcode-lsync-root:/algator_lsync_root
     depends_on:
       - smartcode-lsync
+
+volumes:
+  smartcode-lsync-root:
