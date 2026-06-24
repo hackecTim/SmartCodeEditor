@@ -1,18 +1,24 @@
 @echo off
 setlocal EnableDelayedExpansion
 
-:: SmartCode — Windows zagonski skript
-:: Zahteva: Docker Desktop
-:: Zaženite iz mape smartCodev4\
+:: SmartCode v4 - Windows zagon prek Docker Compose
+:: Uporabnik nastavi samo ALGATOR_ROOT v langserver\.env
 
 set SCRIPT_DIR=%~dp0
 set COMPOSE_DIR=%SCRIPT_DIR%langserver
 set ENV_FILE=%COMPOSE_DIR%\.env
 
-:: Ustvari .env če ne obstaja
 if not exist "%ENV_FILE%" (
     copy "%COMPOSE_DIR%\.env.example" "%ENV_FILE%" >nul
-    echo Ustvarjen %ENV_FILE% — preveri poti pred zagonom!
+    echo Ustvarjen %ENV_FILE%
+    echo Po potrebi popravi ALGATOR_ROOT in ponovno zazeni skripto.
+)
+
+where docker-compose >nul 2>nul
+if %errorlevel% equ 0 (
+    set DC=docker-compose
+) else (
+    set DC=docker compose
 )
 
 if "%1"=="stop"    goto stop
@@ -22,40 +28,40 @@ if "%1"=="status"  goto status
 goto start
 
 :stop
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" down
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" down
 goto end
 
 :logs
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" logs -f
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" logs -f
 goto end
 
 :restart
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" down
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" up -d --build
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" down
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" up -d --build
 goto end
 
 :status
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" ps
-curl -s http://localhost:3000/health
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" ps
+curl.exe -s http://localhost:3000/health
 goto end
 
 :start
-echo === SmartCode ===
-echo   Za spremembo poti uredi: langserver\.env
-echo   LSP: http://localhost:3000
+echo === SmartCode v4 ===
+echo Nastavitev poti: langserver\.env
+echo Uporablja se samo ALGATOR_ROOT.
+echo LSP: http://localhost:3000
 echo.
-docker-compose -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" up -d --build
+%DC% -f "%COMPOSE_DIR%\docker-compose.yml" --env-file "%ENV_FILE%" up -d --build
 if %errorlevel% neq 0 goto err
 echo.
-echo OK. Odpri urejevalnik:
-echo   editor-single.html?projectFolder=PROJ-BasicSort
-echo.
-echo   smartcode.bat logs   — logi
-echo   smartcode.bat stop   — ustavi
+echo OK.
+echo Logi:     smartcode.bat logs
+echo Status:   smartcode.bat status
+echo Ustavi:   smartcode.bat stop
 goto end
 
 :err
-echo NAPAKA!
+echo NAPAKA pri zagonu.
 exit /b 1
 
 :end
