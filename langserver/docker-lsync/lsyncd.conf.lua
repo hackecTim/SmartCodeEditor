@@ -17,6 +17,10 @@ sync {
         verbose = false,
         _extra = {
             "--delete",
+            "--filter=P .classpath",
+            "--filter=P .project",
+            "--filter=P .settings/***",
+            "--filter=P bin/***",
             "--include=*/",
             "--include=*.java",
             "--include=*.c",
@@ -33,6 +37,8 @@ sync {
             "--include=pom.xml",
             "--include=build.gradle",
             "--include=build.gradle.kts",
+            "--include=CMakeLists.txt",
+            "--include=compile_commands.json",
             "--exclude=*",
             "--prune-empty-dirs"
         }
