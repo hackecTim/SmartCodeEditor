@@ -89,6 +89,72 @@ function severityToLabel(severity) {
   return "Hint";
 }
 
+function compactDiagnosticMessage(message) {
+  const text = String(message || "").trim();
+
+  if (/^The import .+ cannot be resolved$/i.test(text)) {
+    return "The import cannot be resolved";
+  }
+
+  if (/^.+ cannot be resolved to a type$/i.test(text)) {
+    return "A type cannot be resolved";
+  }
+
+  if (/^The method .+ must override or implement a supertype method$/i.test(text)) {
+    return "A method cannot override or implement a supertype method";
+  }
+
+  return text;
+}
+
+function compactDiagnostics(diagnostics) {
+  const seen = new Set();
+
+  return (diagnostics || [])
+    .filter(diag => diag && (diag.severity === 1 || diag.severity === 2))
+    .filter(diag => {
+      const start = diag.range?.start || {};
+      const end = diag.range?.end || {};
+      const key = [
+        diag.severity,
+        diag.message,
+        start.line,
+        start.character,
+        end.line,
+        end.character
+      ].join("|");
+
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function groupDiagnosticsForPanel(diagnostics) {
+  const groups = new Map();
+
+  (diagnostics || []).forEach(diag => {
+    const message = compactDiagnosticMessage(diag.message);
+    const key = `${diag.severity}|${message}`;
+    const existing = groups.get(key);
+
+    if (existing) {
+      existing.count += 1;
+      existing.locations.push(diag);
+    } else {
+      groups.set(key, {
+        severity: diag.severity,
+        message,
+        first: diag,
+        count: 1,
+        locations: [diag]
+      });
+    }
+  });
+
+  return Array.from(groups.values());
+}
+
 // Browser cache
 
 
@@ -456,6 +522,16 @@ async function setServerProjectFolder(projectFolder) {
   }
 }
 
+let embeddedServerProjectFolder = null;
+
+async function ensureEmbeddedServerProjectFolder(projectFolder) {
+  const folder = normalizePath(projectFolder || "").replace(/\/+$/, "");
+  if (!folder || embeddedServerProjectFolder === folder) return true;
+  const ok = await setServerProjectFolder(folder);
+  if (ok) embeddedServerProjectFolder = folder;
+  return ok;
+}
+
 // LSP routing
 
 function lspRequest(method, params) {
@@ -574,17 +650,221 @@ function getInsertText(item) {
   return item.label || "";
 }
 
+function getCompletionEditRange(item, fallbackFrom, fallbackTo) {
+  const edit = item?.textEdit;
+  const range =
+    edit?.replace ||
+    edit?.insert ||
+    edit?.range;
+
+  if (
+    !range?.start ||
+    !range?.end ||
+    !Number.isInteger(range.start.line) ||
+    !Number.isInteger(range.start.character) ||
+    !Number.isInteger(range.end.line) ||
+    !Number.isInteger(range.end.character)
+  ) {
+    return {
+      from: fallbackFrom,
+      to: fallbackTo
+    };
+  }
+
+  return {
+    from: {
+      line: range.start.line,
+      ch: range.start.character
+    },
+    to: {
+      line: range.end.line,
+      ch: range.end.character
+    }
+  };
+}
+
+const JAVA_LOCAL_SNIPPETS = [
+  {
+    label: "cast",
+    detail: "Casts the expression to a new type",
+    insertText: "(${1:Type}) ${2:expression}"
+  },
+  {
+    label: "for",
+    detail: "Creates a for statement",
+    insertText: "for (int ${1:i} = 0; ${1:i} < ${2:length}; ${1:i}++) {\n\t$0\n}"
+  },
+  {
+    label: "foreach",
+    detail: "Creates an enhanced for statement",
+    insertText: "for (${1:Type} ${2:item} : ${3:collection}) {\n\t$0\n}"
+  },
+  {
+    label: "forr",
+    detail: "Creates a reverse for statement",
+    insertText: "for (int ${1:i} = ${2:length} - 1; ${1:i} >= 0; ${1:i}--) {\n\t$0\n}"
+  },
+  {
+    label: "nnull",
+    detail: "Creates an if statement and checks for not null",
+    insertText: "if (${1:expression} != null) {\n\t$0\n}"
+  },
+  {
+    label: "null",
+    detail: "Creates an if statement and checks for null",
+    insertText: "if (${1:expression} == null) {\n\t$0\n}"
+  },
+  {
+    label: "opt",
+    detail: "Creates an Optional.ofNullable(...) call",
+    insertText: "Optional.ofNullable(${1:value})"
+  },
+  {
+    label: "syserr",
+    detail: "Sends the affected object to System.err",
+    insertText: "System.err.println(${1});"
+  },
+  {
+    label: "sysout",
+    detail: "Sends the affected object to System.out",
+    insertText: "System.out.println(${1});"
+  }
+];
+
+function javaSnippetItems(prefix = "") {
+  const low = String(prefix || "").toLowerCase();
+
+  return JAVA_LOCAL_SNIPPETS
+    .filter(snippet => !low || snippet.label.startsWith(low))
+    .map((snippet, index) => ({
+      ...snippet,
+      kind: 15,
+      insertTextFormat: 2,
+      sortText: `0000-${String(index).padStart(2, "0")}-${snippet.label}`,
+      data: {
+        smartCodeLocalJavaSnippet: true
+      }
+    }));
+}
+
+function isLocalJavaSnippet(item) {
+  return item?.data?.smartCodeLocalJavaSnippet === true;
+}
+
+function expandSnippetText(rawText, indent = "") {
+  const raw = String(rawText || "");
+  const placeholders = new Map();
+  let finalCursor = null;
+  let output = "";
+  let lastIndex = 0;
+
+  const appendText = value => {
+    output += String(value || "").replace(/\n/g, `\n${indent}`);
+  };
+
+  const tokenPattern =
+    /\$\{(\d+):([^}]*)\}|\$\{(\d+)\}|\$(\d+)/g;
+
+  let match;
+
+  while ((match = tokenPattern.exec(raw)) !== null) {
+    appendText(raw.slice(lastIndex, match.index));
+
+    const placeholderNumber = Number(
+      match[1] ?? match[3] ?? match[4]
+    );
+
+    const defaultValue = match[2] ?? "";
+
+    if (placeholderNumber === 0) {
+      finalCursor = output.length;
+    } else {
+      const start = output.length;
+      appendText(defaultValue);
+      const end = output.length;
+
+      if (!placeholders.has(placeholderNumber)) {
+        placeholders.set(placeholderNumber, {
+          start,
+          end
+        });
+      }
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  appendText(raw.slice(lastIndex));
+
+  const orderedPlaceholders = Array.from(placeholders.entries())
+    .sort((a, b) => a[0] - b[0]);
+
+  return {
+    text: output,
+    selection: orderedPlaceholders.length
+      ? orderedPlaceholders[0][1]
+      : null,
+    finalCursor:
+      finalCursor === null ? output.length : finalCursor
+  };
+}
+
+function insertSnippet(cm, rawText, from, to) {
+  const lineText = cm.getLine(from.line) || "";
+  const indent = (lineText.slice(0, from.ch).match(/^\s*/) || [""])[0];
+  const expanded = expandSnippetText(rawText, indent);
+  const baseIndex = cm.indexFromPos(from);
+
+  cm.replaceRange(expanded.text, from, to, "complete");
+
+  if (expanded.selection) {
+    const selectionFrom = cm.posFromIndex(
+      baseIndex + expanded.selection.start
+    );
+
+    const selectionTo = cm.posFromIndex(
+      baseIndex + expanded.selection.end
+    );
+
+    cm.setSelection(selectionFrom, selectionTo);
+    return;
+  }
+
+  cm.setCursor(
+    cm.posFromIndex(baseIndex + expanded.finalCursor)
+  );
+}
+
 function isCallable(item) {
-  return [2, 3, 6].includes(item.kind) ||
-    (item.label || "").includes("(") ||
-    (item.detail || "").includes("(") ||
-    (item.insertText || "").includes("(");
+  const kind = Number(item?.kind);
+
+  // LSP CompletionItemKind:
+  // 2 = Method, 3 = Function, 4 = Constructor.
+  if ([2, 3, 4].includes(kind)) return true;
+
+  // Vsi drugi standardni tipi (package/module, class, variable,
+  // field, snippet ...) ne smejo dobiti avtomatskih oklepajev.
+  if (kind >= 1 && kind <= 25) return false;
+
+  // Rezervni način samo za strežnike, ki ne vrnejo kind.
+  const candidate = stripSnippets(
+    item?.textEdit?.newText ||
+    item?.insertText ||
+    item?.label ||
+    ""
+  );
+
+  return /^[A-Za-z_$][A-Za-z0-9_$]*\s*\(/.test(candidate);
 }
 
 function getFunctionName(item) {
   const clean = stripSnippets(item.insertText || item.textEdit?.newText || item.label || "");
   const m = clean.match(/^([A-Za-z_][A-Za-z0-9_]*)/);
   return m ? m[1] : clean.split("(")[0].trim();
+}
+
+function isJavaMemberCompletionItem(item) {
+  return [2, 5, 6, 10, 12, 20, 21].includes(item?.kind);
 }
 
 function getKindInfo(kind) {
@@ -703,6 +983,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   if (window.smartCodeInitialMode === 3) {
     if (hasServerSupport()) {
+      const opts = window.smartCodeInitialOptions || {};
+      if (opts.projectFolder) {
+        await setServerProjectFolder(opts.projectFolder);
+      } else {
+        const hasExplicitSyncRoot = Object.prototype.hasOwnProperty.call(opts, "syncRoot");
+        const syncRoot = hasExplicitSyncRoot ? (opts.syncRoot || "") : (opts.folder || "");
+        await setServerSyncRoot(syncRoot);
+      }
+
       initClangdLsp();
       initJavaLsp();
     }
@@ -735,11 +1024,14 @@ document.addEventListener("DOMContentLoaded", async () => {
 // Editor setup
 
 function initEditor() {
-  let ta = document.querySelector(".editor-wrapper textarea");
-  if (!ta) {
-    setTimeout(initEditor, 50);
-    return;
-  }
+  /*
+   * Glavni PROJECT/FOLDER editor ima vedno textarea z id="editor".
+   * Ne uporabljaj splošnega ".editor-wrapper textarea", ker bi globalni
+   * initEditor ob prvem odprtju ALGator algoritma prevzel textarea
+   * embedded editorja in nad njim ustvaril še en prazen CodeMirror.
+   */
+  const ta = document.getElementById("editor");
+  if (!ta) return;
 
   editor = CodeMirror.fromTextArea(ta, {
     mode: "text/plain",
@@ -1884,6 +2176,14 @@ function requestCompletion(triggerChar = null) {
       if (cur.line !== reqCur.line || cur.ch < from.ch) return;
 
       let items = Array.isArray(result) ? result : (result?.items ?? []);
+
+      if (isJava() && !isMember) {
+        items = [
+          ...javaSnippetItems(typedPrefix),
+          ...items
+        ];
+      }
+
       if (!items.length) {
         if (editor.state.completionActive) editor.closeHint?.();
         return;
@@ -1905,12 +2205,6 @@ function requestCompletion(triggerChar = null) {
         } else {
           items = items.filter(i => (i.sortText || "9") < "7");
         }
-      } else if (isJava() && isMember) {
-        const m = items.filter(i => {
-          const s = i.sortText || "";
-          return !(s.startsWith("zzz") || s.startsWith("ZZZ"));
-        });
-        if (m.length) items = m;
       }
 
       if (!items.length) {
@@ -1931,7 +2225,8 @@ function requestCompletion(triggerChar = null) {
         from,
         to,
         list: items.map(item => {
-          const callable = isCallable(item);
+          const localSnippet = isLocalJavaSnippet(item);
+          const callable = !localSnippet && isCallable(item);
           const displayLabel = callable
             ? (item.label.includes("(") ? item.label : item.label + "(…)")
             : item.label;
@@ -1939,7 +2234,7 @@ function requestCompletion(triggerChar = null) {
             text: callable ? getFunctionName(item) + "()" : getInsertText(item) || item.label,
     
             render(el) {
-              el.className = "CodeMirror-hint lsp-hint-item";
+              el.classList.add("lsp-hint-item");
 
                             const kindIcon = document.createElement("span");
               kindIcon.className = "lsp-hint-kind";
@@ -1963,14 +2258,46 @@ function requestCompletion(triggerChar = null) {
             },
             hint(cm) {
               suppressInputRead = true;
+
+              const editRange = getCompletionEditRange(
+                item,
+                from,
+                to
+              );
+
               try {
-                if (callable) {
-                  cm.replaceRange(getFunctionName(item) + "()", from, to, "complete");
+                if (localSnippet) {
+                  insertSnippet(
+                    cm,
+                    item.insertText || item.label,
+                    editRange.from,
+                    editRange.to
+                  );
+                } else if (callable) {
+                  cm.replaceRange(
+                    getFunctionName(item) + "()",
+                    editRange.from,
+                    editRange.to,
+                    "complete"
+                  );
+
                   const p = cm.getCursor();
-                  cm.setCursor({ line: p.line, ch: p.ch - 1 });
-                  setTimeout(() => requestSignatureHelp("(", false), 60);
+                  cm.setCursor({
+                    line: p.line,
+                    ch: p.ch - 1
+                  });
+
+                  setTimeout(
+                    () => requestSignatureHelp("(", false),
+                    60
+                  );
                 } else {
-                  cm.replaceRange(getInsertText(item) || item.label, from, to, "complete");
+                  cm.replaceRange(
+                    getInsertText(item) || item.label,
+                    editRange.from,
+                    editRange.to,
+                    "complete"
+                  );
                 }
               } finally {
                 setTimeout(() => { suppressInputRead = false; }, 0);
@@ -2245,9 +2572,11 @@ class AlgatorInstance {
     this.id       = _algatorIdCounter++;
     this.language = opts.language || "java";
     this.projectFolder = opts.projectFolder || opts.folder || opts.project || null;
+    this.lspFolder = opts.lspFolder || this.projectFolder || null;
     this.folder   = opts.folder || this.projectFolder || null;
     this.syncRoot = opts.syncRoot || this.projectFolder || null;
     this.savePath = opts.savePath || null;
+    this.saveEnabled = opts.saveEnabled === true;
     this._showDiagnostics = opts.showDiagnostics !== false;
     this._marks   = [];
     this._version = 1;
@@ -2260,9 +2589,12 @@ class AlgatorInstance {
 
     this._updateVirtualFile();
 
-    this._buildDom(containerEl);
-    this._initCM();
-    this._connectLsp();
+	this._buildDom(containerEl);
+	this._initCM();
+
+	this.setContent(opts.content ?? "", this.language);
+
+this._connectLsp();
   }
 
   _extensionForLanguage(lang) {
@@ -2420,8 +2752,10 @@ class AlgatorInstance {
 
       this._notifyLspChange();
 
-      clearTimeout(this._saveTimer);
-      this._saveTimer = setTimeout(() => this._saveToAlgator(), CFG.editor.autosaveDelay ?? 1500);
+      if (this.saveEnabled) {
+        clearTimeout(this._saveTimer);
+        this._saveTimer = setTimeout(() => this._saveToWorkspace(), CFG.editor.autosaveDelay ?? 1500);
+      }
 
       if (ch.origin === "+delete") {
         clearTimeout(this._compTimer);
@@ -2691,6 +3025,14 @@ class AlgatorInstance {
       if (seq !== this._compSeq) return;
 
       let items = Array.isArray(result) ? result : (result?.items ?? []);
+
+      if (this._isJava() && !isMember) {
+        items = [
+          ...javaSnippetItems(typedPfx),
+          ...items
+        ];
+      }
+
       if (!items.length) return;
 
             if (typedPfx) {
@@ -2704,9 +3046,6 @@ class AlgatorInstance {
         items = isMember
           ? items.filter(i => (i.sortText || "9") < "4") || items
           : items.filter(i => (i.sortText || "9") < "7");
-      } else if (isMember) {
-        const m = items.filter(i => { const s = i.sortText || ""; return !(s.startsWith("zzz") || s.startsWith("ZZZ")); });
-        if (m.length) items = m;
       }
 
       if (!items.length) return;
@@ -2721,13 +3060,14 @@ class AlgatorInstance {
       CodeMirror.showHint(this.cm, () => ({
         from, to,
         list: items.map(item => {
-          const callable    = isCallable(item);
+          const localSnippet = isLocalJavaSnippet(item);
+          const callable    = !localSnippet && isCallable(item);
           const kindInfo    = getKindInfo(item.kind);
           const displayLbl  = callable ? (item.label.includes("(") ? item.label : item.label + "(…)") : item.label;
           return {
             text: callable ? getFunctionName(item) + "()" : getInsertText(item) || item.label,
             render(el) {
-              el.className = "CodeMirror-hint lsp-hint-item";
+              el.classList.add("lsp-hint-item");
               const icon = document.createElement("span");
               icon.className = "lsp-hint-kind"; icon.textContent = kindInfo.icon; icon.style.color = kindInfo.color;
               el.appendChild(icon);
@@ -2744,14 +3084,46 @@ class AlgatorInstance {
             },
             hint(cm) {
               self._suppressCompletion = true;
+
+              const editRange = getCompletionEditRange(
+                item,
+                from,
+                to
+              );
+
               try {
-                if (callable) {
-                  cm.replaceRange(getFunctionName(item) + "()", from, to, "complete");
+                if (localSnippet) {
+                  insertSnippet(
+                    cm,
+                    item.insertText || item.label,
+                    editRange.from,
+                    editRange.to
+                  );
+                } else if (callable) {
+                  cm.replaceRange(
+                    getFunctionName(item) + "()",
+                    editRange.from,
+                    editRange.to,
+                    "complete"
+                  );
+
                   const p = cm.getCursor();
-                  cm.setCursor({ line: p.line, ch: p.ch - 1 });
-                  setTimeout(() => self._requestSignatureHelp("(", false), 60);
+                  cm.setCursor({
+                    line: p.line,
+                    ch: p.ch - 1
+                  });
+
+                  setTimeout(
+                    () => self._requestSignatureHelp("(", false),
+                    60
+                  );
                 } else {
-                  cm.replaceRange(getInsertText(item) || item.label, from, to, "complete");
+                  cm.replaceRange(
+                    getInsertText(item) || item.label,
+                    editRange.from,
+                    editRange.to,
+                    "complete"
+                  );
                 }
               } finally {
                 setTimeout(() => { self._suppressCompletion = false; }, 0);
@@ -2776,16 +3148,25 @@ class AlgatorInstance {
 
   _renderDiagnostics(diagnostics) {
     this._clearDiagMarks();
-    const items   = diagnostics || [];
-    const errors  = items.filter(d => d.severity === 1).length;
-    const warns   = items.filter(d => d.severity === 2).length;
 
-    if (this._diagCount) this._diagCount.textContent = `${errors} errors, ${warns} warnings`;
+    const items = compactDiagnostics(diagnostics);
+    const groups = groupDiagnosticsForPanel(items);
+    const errors = groups.filter(group => group.severity === 1).length;
+    const warns = groups.filter(group => group.severity === 2).length;
+
+    if (this._diagCount) {
+      this._diagCount.textContent = `${errors} errors, ${warns} warnings`;
+    }
 
     if (!this._showDiagnostics || !items.length) {
       this._diagPanel.classList.remove("has-problems");
       this._diagPanel.style.display = "none";
-      if (this._diagList) this._diagList.innerHTML = "<div class='diagnostics-empty'>Ni zaznanih napak.</div>";
+
+      if (this._diagList) {
+        this._diagList.innerHTML =
+          "<div class='diagnostics-empty'>Ni zaznanih napak.</div>";
+      }
+
       return;
     }
 
@@ -2793,55 +3174,116 @@ class AlgatorInstance {
     this._diagPanel.classList.add("has-problems");
 
     const byLine = new Map();
-    items.forEach(diag => {
-      const sc   = severityToClass(diag.severity);
-      const from = { line: diag.range.start.line, ch: diag.range.start.character };
-      let eLine  = diag.range.end.line, eCh = diag.range.end.character;
-      if (from.line === eLine && from.ch === eCh) eCh = from.ch + 1;
-      const lineText = this.cm.getLine(from.line) || "";
-      if (from.line === eLine && eCh > lineText.length) eCh = lineText.length;
-      if (from.line === eLine && eCh <= from.ch)        eCh = Math.min(lineText.length, from.ch + 1);
 
-      const mark = this.cm.markText(from, { line: eLine, ch: eCh }, {
-        className:  `cm-lsp-${sc}`,
-        attributes: { title: `${severityToLabel(diag.severity)}: ${diag.message}` }
-      });
+    items.forEach(diag => {
+      const sc = severityToClass(diag.severity);
+      const start = diag.range?.start || { line: 0, character: 0 };
+      const end = diag.range?.end || start;
+      const from = {
+        line: start.line ?? 0,
+        ch: start.character ?? 0
+      };
+
+      let eLine = end.line ?? from.line;
+      let eCh = end.character ?? from.ch;
+
+      if (from.line === eLine && from.ch === eCh) {
+        eCh = from.ch + 1;
+      }
+
+      const lineText = this.cm.getLine(from.line) || "";
+
+      if (from.line === eLine && eCh > lineText.length) {
+        eCh = lineText.length;
+      }
+
+      if (from.line === eLine && eCh <= from.ch) {
+        eCh = Math.min(lineText.length, from.ch + 1);
+      }
+
+      const mark = this.cm.markText(
+        from,
+        { line: eLine, ch: eCh },
+        {
+          className: `cm-lsp-${sc}`,
+          attributes: {
+            title: `${severityToLabel(diag.severity)}: ${diag.message}`
+          }
+        }
+      );
+
       this._marks.push(mark);
 
-      const ex = byLine.get(from.line);
-      if (!ex) byLine.set(from.line, { severity: diag.severity, diagnostics: [diag] });
-      else { ex.diagnostics.push(diag); if ((diag.severity || 4) < (ex.severity || 4)) ex.severity = diag.severity; }
+      const existing = byLine.get(from.line);
+
+      if (!existing) {
+        byLine.set(from.line, {
+          severity: diag.severity,
+          diagnostics: [diag]
+        });
+      } else {
+        existing.diagnostics.push(diag);
+
+        if ((diag.severity || 4) < (existing.severity || 4)) {
+          existing.severity = diag.severity;
+        }
+      }
     });
 
     for (const [line, info] of byLine) {
       const sc = severityToClass(info.severity);
-      const gm = document.createElement("div");
-      gm.className = `cm-diagnostic-gutter-marker is-${sc}`;
-      gm.title = info.diagnostics.map(d => `${severityToLabel(d.severity)}: ${d.message}`).join("\n");
-      gm.textContent = info.severity === 1 ? "●" : info.severity === 2 ? "▲" : "◆";
-      this.cm.setGutterMarker(line, "lsp-diagnostics-gutter", gm);
-      this._marks.push({ clear: () => this.cm.setGutterMarker(line, "lsp-diagnostics-gutter", null) });
-      this.cm.addLineClass(line, "background", `cm-diagnostic-line-${sc}`);
-      this._marks.push({ clear: () => this.cm.removeLineClass(line, "background", `cm-diagnostic-line-${sc}`) });
+      const marker = document.createElement("div");
+
+      marker.className = `cm-diagnostic-gutter-marker is-${sc}`;
+      marker.title = info.diagnostics
+        .map(diag => `${severityToLabel(diag.severity)}: ${diag.message}`)
+        .join("\n");
+      marker.textContent = info.severity === 1 ? "●" : "▲";
+
+      this.cm.setGutterMarker(
+        line,
+        "lsp-diagnostics-gutter",
+        marker
+      );
+
+      this._marks.push({
+        clear: () =>
+          this.cm.setGutterMarker(
+            line,
+            "lsp-diagnostics-gutter",
+            null
+          )
+      });
     }
 
     if (this._diagList) {
       this._diagList.innerHTML = "";
-      items.forEach(diag => {
-        const row  = document.createElement("button");
-        row.type   = "button";
-        row.className = `diagnostic-item is-${severityToClass(diag.severity)}`;
-        const line = diag.range?.start?.line     ?? 0;
-        const ch   = diag.range?.start?.character ?? 0;
+
+      groups.slice(0, 10).forEach(group => {
+        const diag = group.first;
+        const row = document.createElement("button");
+        const line = diag.range?.start?.line ?? 0;
+        const ch = diag.range?.start?.character ?? 0;
+        const occurrences =
+          group.count > 1 ? ` • ${group.count} locations` : "";
+
+        row.type = "button";
+        row.className =
+          `diagnostic-item is-${severityToClass(group.severity)}`;
+
         row.innerHTML = `
-          <span class="diagnostic-severity ${severityToClass(diag.severity)}"></span>
+          <span class="diagnostic-severity ${severityToClass(group.severity)}"></span>
           <span class="diagnostic-main">
-            <span class="diagnostic-message">${escapeHtml(diag.message)}</span>
-            <span class="diagnostic-meta">${severityToLabel(diag.severity)} • line ${line + 1}, col ${ch + 1}</span>
+            <span class="diagnostic-message">${escapeHtml(group.message)}</span>
+            <span class="diagnostic-meta">${severityToLabel(group.severity)} • line ${line + 1}, col ${ch + 1}${occurrences}</span>
           </span>`;
+
         row.addEventListener("click", () => {
-          this.cm.focus(); this.cm.setCursor({ line, ch }); this.cm.scrollIntoView({ line, ch }, 120);
+          this.cm.focus();
+          this.cm.setCursor({ line, ch });
+          this.cm.scrollIntoView({ line, ch }, 120);
         });
+
         this._diagList.appendChild(row);
       });
     }
@@ -2855,9 +3297,14 @@ class AlgatorInstance {
     });
 
     const activate = async () => {
-            await _waitLspInit(this._isJava());
+      const lspFolder = normalizePath(
+        this.lspFolder || this.projectFolder || this.folder || this.syncRoot || ""
+      ).replace(/\/+$/, "");
+
+      if (lspFolder) await ensureEmbeddedServerProjectFolder(lspFolder);
+      await _waitLspInit(this._isJava());
       this._openInLsp();
-      if (this.folder) await this._openFolderContext();
+      if (lspFolder) await this._openFolderContext();
       if (!this._ready) {
         this._ready = true;
         this._readyCbs.forEach(fn => fn(this));
@@ -2872,7 +3319,9 @@ class AlgatorInstance {
   }
 
   async _openFolderContext() {
-    const folder = normalizePath(this.projectFolder || this.folder || this.syncRoot || "");
+    const folder = normalizePath(
+      this.lspFolder || this.projectFolder || this.folder || this.syncRoot || ""
+    );
     if (!hasServerSupport() || !folder) return;
     try {
       const url = `${CFG.server.httpUrl}/scan?folder=${encodeURIComponent(folder)}`;
@@ -2929,15 +3378,14 @@ class AlgatorInstance {
       });
     }
 
-    // Sinhronization
-    if (hasServerSupport()) {
+    if (this.saveEnabled && hasServerSupport()) {
       clearTimeout(this._saveTimer);
-      this._saveTimer = setTimeout(() => this._saveToAlgator(), 300);
+      this._saveTimer = setTimeout(() => this._saveToWorkspace(), 300);
     }
   }
 
-  async _saveToAlgator() {
-    if (!hasServerSupport()) return;
+  async _saveToWorkspace() {
+    if (!this.saveEnabled || !hasServerSupport()) return;
     const content = this.cm.getValue();
 
     try {

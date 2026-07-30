@@ -17,6 +17,13 @@
 //     console.log(ed.getContent());
 //   });
 //
+// EMBEDDED:
+//   var ed = smartCodeEditor.initEmbeddedEditor({
+//     divId: "my-editor",
+//     hiddenDiv: "my-hidden-textarea",
+//     height: "700px" // sprejme tudi številko: 700
+//   });
+//
 
 window.smartCodeEditor = (() => {
 
@@ -31,6 +38,26 @@ window.smartCodeEditor = (() => {
   function resolveMode(m) {
     if (typeof m === "string") return _modeMap[m.toLowerCase()] ?? 1;
     return Number(m) || 1;
+  }
+
+  function normalizeCssSize(value, fallback = null) {
+    if (value === undefined || value === null || value === "") {
+      return fallback;
+    }
+
+    return typeof value === "number"
+      ? `${value}px`
+      : String(value);
+  }
+
+  function applyEmbeddedHeight(root, value, fallback = "650px") {
+    if (!root) return;
+
+    const height = normalizeCssSize(value, fallback);
+    if (!height) return;
+
+    root.style.height = height;
+    root.style.minHeight = height;
   }
 
   const callbacks = { onChange: null, onSave: null, onFileOpen: null };
@@ -188,7 +215,11 @@ window.smartCodeEditor = (() => {
         root.style.flexDirection = "column";
         root.style.overflow      = "hidden";
 
-        if (!root.style.height) root.style.height = "100%";
+        applyEmbeddedHeight(
+          root,
+          this.options.height,
+          root.style.height || "100%"
+        );
 
         const initialContent =
           Object.prototype.hasOwnProperty.call(this.options, "content")
@@ -198,12 +229,16 @@ window.smartCodeEditor = (() => {
         this.embeddedEditorInstance = factory(root, {
           language:        this.options.language || "java",
           projectFolder:   this.options.projectFolder || this.options.folder || this.options.project || null,
+          lspFolder:       this.options.lspFolder || this.options.projectFolder || this.options.folder || this.options.project || null,
           folder:          this.options.folder || this.options.projectFolder || this.options.project || null,
           syncRoot:        this.syncRoot,
           lsyncEnabled:    this.lsyncEnabled,
           savePath:        this.options.savePath || null,
+          saveEnabled:     this.options.saveEnabled === true,
           showDiagnostics: this.showDiagnostics,
-          content:         initialContent
+          readOnly:        this.options.readOnly !== false,
+          content:         initialContent,
+          height:          this.options.height
         });
 
         this.readyState = true;
@@ -592,13 +627,588 @@ window.smartCodeEditor = (() => {
     }
   }
 
+
+  function embeddedModeToLanguage(mode, fallback = "java") {
+    const m = String(mode || "").toLowerCase();
+    if (m.includes("c++") || m.includes("cpp")) return "cpp";
+    if (m.includes("csrc") || m.includes("x-c") || m === "c") return "c";
+    if (m.includes("java")) return "java";
+    return fallback;
+  }
+
+  function normalizeEmbeddedProjectFolder(projectName, projectFolder) {
+    if (projectFolder) return projectFolder;
+    if (!projectName) return "";
+    const name = String(projectName);
+    return name.startsWith("PROJ-") ? name : "PROJ-" + name;
+  }
+
+  function getServerHttpUrl() {
+    return typeof SmartCodeConfig !== "undefined" && SmartCodeConfig.server?.httpUrl
+      ? SmartCodeConfig.server.httpUrl
+      : "http://localhost:3000";
+  }
+
+  function encodeEmbeddedWorkspacePath(path) {
+    return String(path || "")
+      .replace(/\\/g, "/")
+      .split("/")
+      .filter(Boolean)
+      .map(encodeURIComponent)
+      .join("/");
+  }
+
+  function waitEmbedded(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  function inferJavaFilePath(filePath, content, language, enabled = true) {
+    if (
+      enabled === false ||
+      String(language || "").toLowerCase() !== "java" ||
+      !content
+    ) {
+      return filePath;
+    }
+
+    const match = String(content).match(
+      /\bpublic\s+(?:(?:abstract|final|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)/
+    );
+
+    if (!match) return filePath;
+
+    const normalized = String(filePath || "Main.java").replace(/\\/g, "/");
+    const slash = normalized.lastIndexOf("/");
+    const folder = slash >= 0 ? normalized.slice(0, slash + 1) : "";
+
+    return `${folder}${match[1]}.java`;
+  }
+
+  async function resolveEmbeddedSource(opts) {
+    if (!opts.projectName || !opts.algorithmName) {
+      const language = opts.language || embeddedModeToLanguage(opts.mode, "java");
+      const projectFolder = normalizeEmbeddedProjectFolder(
+        opts.projectName,
+        opts.projectFolder || opts.folder || opts.project
+      );
+      let savePath = opts.filePath || opts.savePath || opts.relativePath ||
+        ((opts.key || "Main") + ({ java: ".java", c: ".c", cpp: ".cpp" }[language] || ".java"));
+
+      savePath = inferJavaFilePath(
+        savePath,
+        opts.content,
+        language,
+        opts.inferJavaFileName !== false
+      );
+
+      return {
+        ...opts,
+        language,
+        projectFolder,
+        lspFolder: opts.lspFolder || projectFolder,
+        folder: opts.folder || projectFolder,
+        syncRoot: Object.prototype.hasOwnProperty.call(opts, "syncRoot")
+          ? opts.syncRoot
+          : projectFolder,
+        savePath,
+        content: Object.prototype.hasOwnProperty.call(opts, "content")
+          ? (opts.content ?? "")
+          : undefined,
+        saveEnabled: opts.saveEnabled === true
+      };
+    }
+
+    const query = new URLSearchParams({
+      project: String(opts.projectName),
+      algorithm: String(opts.algorithmName)
+    });
+
+    const response = await fetch(`${getServerHttpUrl()}/resolve-embedded-file?${query.toString()}`);
+    if (!response.ok) {
+      let message = `Datoteke algoritma '${opts.algorithmName}' ni mogoče najti.`;
+      try {
+        const body = await response.json();
+        if (body?.error) message = body.error;
+      } catch {}
+      throw new Error(message);
+    }
+
+    const source = await response.json();
+
+    let resolvedContent = source.content ?? "";
+
+    /*
+     * Ob prvem prikazu ALGator včasih odpre panel, preden je vsebina
+     * sinhronizirane datoteke že vrnjena v resolverju. Pot je takrat
+     * pravilna (zato LSP že pokaže diagnostiko), CodeMirror pa dobi
+     * prazen niz. V tem primeru datoteko neposredno preberemo iz
+     * /workspace in nekajkrat ponovimo poskus.
+     */
+    if (
+      resolvedContent === "" &&
+      source.projectFolder &&
+      source.relativePath
+    ) {
+      const workspacePath = encodeEmbeddedWorkspacePath(
+        `${source.projectFolder}/${source.relativePath}`
+      );
+
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          const fileResponse = await fetch(
+            `${getServerHttpUrl()}/workspace/${workspacePath}`,
+            { cache: "no-store" }
+          );
+
+          if (fileResponse.ok) {
+            const fileContent = await fileResponse.text();
+
+            if (fileContent !== "") {
+              resolvedContent = fileContent;
+              break;
+            }
+          }
+        } catch {}
+
+        await waitEmbedded(100);
+      }
+    }
+
+    return {
+      ...opts,
+      language: source.language,
+      projectFolder: source.projectFolder,
+      lspFolder: opts.lspFolder || source.projectFolder,
+      folder: source.projectFolder,
+      syncRoot: source.projectFolder,
+      savePath: source.relativePath,
+      content: resolvedContent,
+      lsyncEnabled: true,
+      saveEnabled: false,
+      resolvedSource: {
+        ...source,
+        content: resolvedContent
+      }
+    };
+  }
+
+  function createEmbeddedAdapter(api, root, hiddenEl, opts) {
+    const listeners = [];
+
+    const resolvedInitialContent =
+      Object.prototype.hasOwnProperty.call(opts, "content")
+        ? String(opts.content ?? "")
+        : null;
+
+    let currentReadOnly = opts.readOnly !== false;
+    let resizeObserver = null;
+    let mutationObserver = null;
+    let visibilityTimer = null;
+    let destroyed = false;
+
+    function getValue() {
+      return api.getContent ? api.getContent() : "";
+    }
+
+    function ensureResolvedContent() {
+      if (
+        resolvedInitialContent === null ||
+        resolvedInitialContent === "" ||
+        getValue() !== ""
+      ) {
+        return false;
+      }
+
+      if (api.setContent) {
+        api.setContent(
+          resolvedInitialContent,
+          opts.language || "java"
+        );
+      }
+
+      if (hiddenEl) {
+        hiddenEl.value = resolvedInitialContent;
+      }
+
+      return true;
+    }
+
+    function setValue(value) {
+      const code = value ?? "";
+      if (api.setContent) api.setContent(code, opts.language || "java");
+      if (hiddenEl) hiddenEl.value = code;
+    }
+
+    function notifyChange(value, cm, change) {
+      const code = value ?? "";
+      if (hiddenEl) {
+        hiddenEl.value = code;
+        hiddenEl.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      if (typeof opts.onChange === "function") opts.onChange(code, opts);
+      listeners.forEach(fn => {
+        try { fn(cm || api.cm, change || { origin: "smartcode" }); }
+        catch (e) { console.error("[smartCodeEditor] embedded change listener:", e); }
+      });
+    }
+
+    function isVisible() {
+      if (destroyed || !root || !document.documentElement.contains(root)) return false;
+
+      const style = window.getComputedStyle(root);
+      const rect = root.getBoundingClientRect();
+
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0;
+    }
+
+    function refreshNow() {
+      if (!isVisible()) return false;
+
+      ensureResolvedContent();
+
+      if (api.refresh) api.refresh();
+      if (api.cm?.refresh) api.cm.refresh();
+
+      return !!api.cm;
+    }
+
+    function refreshEditor() {
+      requestAnimationFrame(() => {
+        if (destroyed || !refreshNow()) return;
+        setTimeout(refreshNow, 60);
+        setTimeout(refreshNow, 180);
+      });
+    }
+
+    function waitUntilVisible() {
+      clearTimeout(visibilityTimer);
+
+      const check = () => {
+        if (destroyed) return;
+
+        if (!refreshNow()) {
+          visibilityTimer = setTimeout(check, 100);
+          return;
+        }
+
+        setTimeout(refreshNow, 60);
+        setTimeout(refreshNow, 180);
+      };
+
+      check();
+    }
+
+    function installVisibilityObservers() {
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver = new ResizeObserver(() => {
+          if (isVisible()) refreshEditor();
+        });
+        resizeObserver.observe(root);
+      }
+
+      if (typeof MutationObserver !== "undefined") {
+        mutationObserver = new MutationObserver(() => {
+          if (isVisible()) refreshEditor();
+        });
+
+        let element = root;
+        while (element && element !== document.documentElement) {
+          mutationObserver.observe(element, {
+            attributes: true,
+            attributeFilter: ["class", "style", "hidden"]
+          });
+          element = element.parentElement;
+        }
+      }
+
+      waitUntilVisible();
+    }
+
+    function applyReadOnly(value) {
+      currentReadOnly = value === true;
+
+      if (api.setReadOnly) api.setReadOnly(currentReadOnly);
+      else if (api.cm?.setOption) api.cm.setOption("readOnly", currentReadOnly);
+
+      root.style.backgroundColor = currentReadOnly ? "#f5f5f5" : "#FBFFFB";
+      refreshEditor();
+    }
+
+    const adapter = {
+      api,
+      getValue() {
+        return getValue();
+      },
+      getDoc() {
+        return {
+          getValue() {
+            return getValue();
+          },
+          setValue(value) {
+            setValue(value);
+          }
+        };
+      },
+      doc: {
+        getValue() {
+          return getValue();
+        },
+        setValue(value) {
+          setValue(value);
+        }
+      },
+      refresh() {
+        refreshEditor();
+        waitUntilVisible();
+      },
+      setSize(width, height) {
+        if (width !== undefined && width !== null && width !== "") {
+          root.style.width = normalizeCssSize(width);
+        }
+
+        if (height !== undefined && height !== null && height !== "") {
+          applyEmbeddedHeight(root, height);
+        }
+
+        refreshEditor();
+        waitUntilVisible();
+      },
+      setOption(option, value) {
+        if (option === "readOnly") {
+          applyReadOnly(value);
+          return;
+        }
+        api.cm?.setOption?.(option, value);
+      },
+      getOption(option) {
+        if (option === "readOnly") return currentReadOnly;
+        return api.cm?.getOption?.(option);
+      },
+      setReadOnly(value) {
+        applyReadOnly(value);
+      },
+      getWrapperElement() {
+        return root;
+      },
+      on(eventName, callback) {
+        if (eventName === "change" && typeof callback === "function") listeners.push(callback);
+      },
+      focus() {
+        if (api.focus) api.focus();
+      },
+      whenReady() {
+        return api.whenReady ? api.whenReady().then(() => adapter) : Promise.resolve(adapter);
+      },
+      destroy() {
+        destroyed = true;
+        clearTimeout(visibilityTimer);
+        resizeObserver?.disconnect();
+        mutationObserver?.disconnect();
+        if (api.destroy) api.destroy();
+      }
+    };
+
+    installVisibilityObservers();
+
+    api.whenReady().then(() => {
+      /*
+       * Prazna začetna vrednost ne sme prepisati kode, ki jo je resolver
+       * oziroma AlgatorInstance že naložil. Neprazno resolver vsebino pa
+       * vedno uporabimo.
+       */
+      if (Object.prototype.hasOwnProperty.call(opts, "content")) {
+        const incomingContent = String(opts.content ?? "");
+        const currentContent = getValue();
+
+        if (incomingContent !== "" || currentContent === "") {
+          setValue(incomingContent);
+        } else if (hiddenEl) {
+          hiddenEl.value = currentContent;
+        }
+      }
+
+      ensureResolvedContent();
+
+      // Uporabi trenutno stanje. Edit mode ga je lahko med inicializacijo že spremenil.
+      applyReadOnly(currentReadOnly);
+
+      if (api.cm) {
+        api.cm.on("change", function(cm, change) {
+          if (change?.origin === "setValue") return;
+          notifyChange(cm.getValue(), cm, change);
+        });
+      }
+
+      waitUntilVisible();
+    });
+
+    return adapter;
+  }
+
+  function createDeferredEmbeddedAdapter(root, hiddenEl, opts) {
+    let activeAdapter = null;
+    let destroyed = false;
+    let pendingValue;
+    let pendingReadOnly = opts.readOnly !== false;
+    const listeners = [];
+    let resolveReady;
+    const readyPromise = new Promise(resolve => { resolveReady = resolve; });
+
+    const adapter = {
+      api: null,
+      error: null,
+      getValue() {
+        if (activeAdapter) return activeAdapter.getValue();
+        if (pendingValue !== undefined) return pendingValue;
+        return hiddenEl ? hiddenEl.value : "";
+      },
+      getDoc() {
+        return adapter.doc;
+      },
+      doc: {
+        getValue() {
+          return adapter.getValue();
+        },
+        setValue(value) {
+          const code = value || "";
+          pendingValue = code;
+          if (hiddenEl) hiddenEl.value = code;
+          if (activeAdapter) activeAdapter.doc.setValue(code);
+        }
+      },
+      refresh() {
+        activeAdapter?.refresh?.();
+      },
+      setSize(width, height) {
+        if (width !== undefined && width !== null && width !== "") {
+          root.style.width = normalizeCssSize(width);
+        }
+
+        if (height !== undefined && height !== null && height !== "") {
+          applyEmbeddedHeight(root, height);
+        }
+
+        activeAdapter?.setSize?.(width, height);
+      },
+      setOption(option, value) {
+        if (option === "readOnly") pendingReadOnly = !!value;
+        activeAdapter?.setOption?.(option, value);
+      },
+      getWrapperElement() {
+        return root;
+      },
+      on(eventName, callback) {
+        if (eventName !== "change" || typeof callback !== "function") return;
+        listeners.push(callback);
+        activeAdapter?.on?.(eventName, callback);
+      },
+      focus() {
+        activeAdapter?.focus?.();
+      },
+      whenReady() {
+        return readyPromise;
+      },
+      destroy() {
+        destroyed = true;
+        activeAdapter?.destroy?.();
+      },
+      _attach(realAdapter) {
+        if (destroyed) {
+          realAdapter?.destroy?.();
+          return;
+        }
+        activeAdapter = realAdapter;
+        adapter.api = realAdapter.api || null;
+        listeners.forEach(listener => activeAdapter.on("change", listener));
+        activeAdapter.setOption("readOnly", pendingReadOnly);
+
+        if (pendingValue !== undefined) {
+          const loadedContent = activeAdapter.getValue();
+
+          if (pendingValue !== "" || loadedContent === "") {
+            activeAdapter.doc.setValue(pendingValue);
+          }
+        }
+
+        activeAdapter.whenReady().then(() => {
+          activeAdapter.refresh?.();
+          resolveReady(adapter);
+        });
+      },
+      _fail(error) {
+        adapter.error = error;
+        root.innerHTML = "";
+        const errorElement = document.createElement("div");
+        errorElement.className = "smartcode-embedded-error";
+        errorElement.textContent = String(error?.message || error);
+        root.appendChild(errorElement);
+        resolveReady(adapter);
+      }
+    };
+
+    return adapter;
+  }
+
+  function initEmbeddedEditor(divIdOrOptions, options = {}) {
+    const opts = typeof divIdOrOptions === "object" && divIdOrOptions !== null
+      ? { ...divIdOrOptions }
+      : { ...options, divId: divIdOrOptions };
+
+    const divId = opts.divId || opts.cmDiv || opts.containerId;
+    const root = document.getElementById(divId);
+    const hiddenEl = opts.hiddenDiv ? document.getElementById(opts.hiddenDiv) : null;
+
+    if (!root) {
+      console.error(`[smartCodeEditor] element #${divId} ne obstaja`);
+      return null;
+    }
+
+    root.innerHTML = "";
+    root.classList.remove("CodeMirror");
+    root.classList.add("smartcode-embedded-root");
+    root.style.display = "flex";
+    root.style.flexDirection = "column";
+    root.style.overflow = "hidden";
+
+    applyEmbeddedHeight(
+      root,
+      opts.height,
+      root.style.height || "650px"
+    );
+
+    const deferred = createDeferredEmbeddedAdapter(root, hiddenEl, opts);
+
+    resolveEmbeddedSource(opts)
+      .then(resolved => {
+        const api = new EditorAPI(
+          divId,
+          false,
+          false,
+          resolved.showDiagnostics !== false,
+          editorMode.SINGLE,
+          resolved
+        );
+        const realAdapter = createEmbeddedAdapter(api, root, hiddenEl, resolved);
+        deferred._attach(realAdapter);
+      })
+      .catch(error => {
+        console.error("[smartCodeEditor] embedded initialization failed:", error);
+        deferred._fail(error);
+      });
+
+    return deferred;
+  }
+
   return {
     editorMode,
 
     // Vrne seznam projektov iz ciljne mape za sinhronizacijo
     async getProjects() {
       try {
-        const url = (window.SmartCodeConfig?.server?.httpUrl || "http://localhost:3000") + "/projects";
+        const url = getServerHttpUrl() + "/projects";
         const res = await fetch(url);
         if (!res.ok) return [];
         const { projects } = await res.json();
@@ -607,6 +1217,8 @@ window.smartCodeEditor = (() => {
         return [];
       }
     },
+
+    initEmbeddedEditor,
 
     initEditor(
       divId,
