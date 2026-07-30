@@ -1,61 +1,84 @@
-#!/bin/bash
-# ── Lokalni lsync (brez Dockerja) ──
-# Kopira programske datoteke iz algator_projects v algator_lsync_root.
-# Zahteva: rsync (in opcijsko inotifywait za Linux, ali polling na Mac/Win)
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+SMARTCODE_DIR="$(dirname "$SCRIPT_DIR")"
+DEFAULT_ALGATOR_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 
-SOURCE="$ROOT_DIR/algator_projects"
-TARGET="$ROOT_DIR/algator_lsync_root"
+ALGATOR_BASE="${ALGATOR_ROOT:-$DEFAULT_ALGATOR_ROOT}"
+SOURCE="${ALGATOR_PROJECTS:-$ALGATOR_BASE/data_root/projects}"
+TARGET="${ALGATOR_LSYNC_ROOT:-$SMARTCODE_DIR/algator_lsync_root}"
 
-mkdir -p "$SOURCE" "$TARGET"
+if [ ! -d "$SOURCE" ]; then
+  echo "ERROR: ALGator projects folder does not exist: $SOURCE"
+  echo "Set ALGATOR_ROOT to the real ALGATOR_ROOT folder."
+  exit 1
+fi
+
+if ! find "$SOURCE" -mindepth 1 -maxdepth 1 -type d -name 'PROJ-*' -print -quit | grep -q .; then
+  echo "ERROR: no PROJ-* folders were found in: $SOURCE"
+  exit 1
+fi
+
+mkdir -p "$TARGET"
 
 RSYNC_ARGS=(
-  -a --checksum --delete
-  --include="*/"
-  --include="*.java"
-  --include="*.c"
-  --include="*.cpp"
-  --include="*.cc"
-  --include="*.cxx"
-  --include="*.h"
-  --include="*.hpp"
-  --include="*.jar"
-  --exclude="*"
+  -a
+  --checksum
+  --delete
   --prune-empty-dirs
+  --filter='P .classpath'
+  --filter='P .project'
+  --filter='P .settings/***'
+  --filter='P bin/***'
+  --filter='P .smartcode-lsync-ready'
+  --include='*/'
+  --include='*.java'
+  --include='*.c'
+  --include='*.cpp'
+  --include='*.cc'
+  --include='*.cxx'
+  --include='*.h'
+  --include='*.hpp'
+  --include='*.jar'
+  --include='algorithm.json'
+  --include='project.json'
+  --include='.classpath'
+  --include='.project'
+  --include='.settings/'
+  --include='.settings/**'
+  --include='pom.xml'
+  --include='build.gradle'
+  --include='build.gradle.kts'
+  --include='CMakeLists.txt'
+  --include='compile_commands.json'
+  --exclude='*'
 )
 
+sync_once() {
+  rsync "${RSYNC_ARGS[@]}" "$SOURCE/" "$TARGET/"
+}
+
 echo "=== SmartCode lsync (lokalno) ==="
-echo "  algator_projects → algator_lsync_root"
-echo "  Source: $SOURCE"
-echo "  Target: $TARGET"
-echo ""
+echo "  ALGATOR_ROOT: $ALGATOR_BASE"
+echo "  Source:       $SOURCE"
+echo "  Target:       $TARGET"
 
-# Začetna sinhronizacija
-echo "[lsync] Začetna sinhronizacija..."
-rsync "${RSYNC_ARGS[@]}" "$SOURCE/" "$TARGET/"
-echo "[lsync] Začetna sinhronizacija OK"
+echo "[lsync] Initial sync..."
+rm -f "$TARGET/.smartcode-lsync-ready"
+sync_once
+touch "$TARGET/.smartcode-lsync-ready"
+echo "[lsync] Initial sync completed."
 
-# Opazovanje
-if command -v inotifywait &>/dev/null; then
-  echo "[lsync] Opazujem s inotifywait..."
+if command -v inotifywait >/dev/null 2>&1; then
+  echo "[lsync] Watching with inotifywait..."
   while inotifywait -r -e modify,create,delete,move "$SOURCE" -q; do
-    rsync "${RSYNC_ARGS[@]}" "$SOURCE/" "$TARGET/"
-    echo "[lsync] Sinhronizacija $(date '+%H:%M:%S')"
+    sync_once
   done
 else
-  # Polling (Mac/Windows WSL)
-  echo "[lsync] inotifywait ni na voljo — polling vsakih 2s..."
-  LAST=""
+  echo "[lsync] inotifywait unavailable; polling every 2s..."
   while true; do
-    CURRENT=$(find "$SOURCE" \( -name "*.java" -o -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.jar" \) -newer "$TARGET" 2>/dev/null | head -1)
-    if [ -n "$CURRENT" ] || [ "$LAST" != "$(find "$SOURCE" -type f | sort | md5sum 2>/dev/null)" ]; then
-      rsync "${RSYNC_ARGS[@]}" "$SOURCE/" "$TARGET/"
-      echo "[lsync] Sinhronizacija $(date '+%H:%M:%S')"
-      LAST="$(find "$SOURCE" -type f | sort | md5sum 2>/dev/null)"
-    fi
     sleep 2
+    sync_once
   done
 fi

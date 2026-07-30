@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ARG JDTLS_VERSION=1.9.0
 ARG JDTLS_DATE=202203031534
 RUN mkdir -p /opt/jdtls && \
-    wget -q "https://download.eclipse.org/jdtls/milestones/${JDTLS_VERSION}/jdt-language-server-${JDTLS_VERSION}-${JDTLS_DATE}.tar.gz" \
+    wget -q "https://download.eclipse.org/jdtls/snapshots/jdt-language-server-latest.tar.gz" \
          -O /tmp/jdtls.tar.gz && \
     tar -xzf /tmp/jdtls.tar.gz -C /opt/jdtls && \
     rm /tmp/jdtls.tar.gz

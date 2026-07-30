@@ -1,46 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SOURCE="${LSYNC_SOURCE:-/algator_projects}"
+SOURCE="${LSYNC_SOURCE:-/algator_root/data_root/projects}"
 TARGET="${LSYNC_TARGET:-/algator_lsync_root}"
 POLL_INTERVAL="${LSYNC_POLL_INTERVAL:-1}"
 VERBOSE="${LSYNC_VERBOSE:-0}"
+READY_FILE="$TARGET/.smartcode-lsync-ready"
 
-mkdir -p "$SOURCE" "$TARGET" /var/log/lsyncd
+mkdir -p "$TARGET" /var/log/lsyncd
 
-cat <<INFO
-=== SmartCode lsync ===
-  Source (<algator_root>):        $SOURCE
-  Target (<algator_lsync_root>):  $TARGET
-  Direction:                      source -> target
-  Polling interval:               ${POLL_INTERVAL}s
-INFO
+echo "=== SmartCode lsync ==="
+echo "Source: $SOURCE"
+echo "Target: $TARGET"
+echo "Direction: source -> target"
 
 if [ ! -d "$SOURCE" ]; then
   echo "ERROR: source folder does not exist: $SOURCE"
   exit 1
 fi
 
-# Varnost: izvorna in ciljna mapa ne smeta biti ista mapa.
-# To prepreči primer, kjer uporabnik isto Windows mapo pripne kot /algator_projects in /algator_lsync_root.
+if ! find "$SOURCE" -mindepth 1 -maxdepth 1 -type d -name 'PROJ-*' -print -quit | grep -q .; then
+  echo "ERROR: no PROJ-* folders found in: $SOURCE"
+  exit 1
+fi
+
 SOURCE_ID="$(stat -c '%d:%i' "$SOURCE" 2>/dev/null || true)"
 TARGET_ID="$(stat -c '%d:%i' "$TARGET" 2>/dev/null || true)"
 if [ -n "$SOURCE_ID" ] && [ "$SOURCE_ID" = "$TARGET_ID" ]; then
-  echo "ERROR: /algator_projects and /algator_lsync_root point to the same directory."
-  echo "Use two different mounts, or use a Docker named volume for /algator_lsync_root."
-  echo "Correct example:"
-  echo "  -v \"D:\\ALGATOR_ROOT\\data_root\\projects:/algator_projects:ro\" -v \"smartcode-lsync-root:/algator_lsync_root\""
+  echo "ERROR: source and target are the same directory"
   exit 1
 fi
 
 sync_once() {
   local args=(
     -a
+    --checksum
     --delete
+    --prune-empty-dirs
     --filter='P .classpath'
     --filter='P .project'
     --filter='P .settings/***'
     --filter='P bin/***'
+    --filter='P .smartcode-lsync-ready'
     --include='*/'
     --include='*.java'
     --include='*.c'
@@ -50,6 +51,8 @@ sync_once() {
     --include='*.h'
     --include='*.hpp'
     --include='*.jar'
+    --include='algorithm.json'
+    --include='project.json'
     --include='.classpath'
     --include='.project'
     --include='.settings/'
@@ -60,7 +63,6 @@ sync_once() {
     --include='CMakeLists.txt'
     --include='compile_commands.json'
     --exclude='*'
-    --prune-empty-dirs
   )
 
   if [ "$VERBOSE" = "1" ]; then
@@ -70,19 +72,16 @@ sync_once() {
   fi
 }
 
-echo "[lsync] Initial sync..."
+rm -f "$READY_FILE"
 sync_once
+touch "$READY_FILE"
 echo "[lsync] Initial sync completed."
 
 if [ "$POLL_INTERVAL" != "0" ]; then
-  echo "[lsync] Starting fallback polling sync every ${POLL_INTERVAL}s..."
   while true; do
     sleep "$POLL_INTERVAL"
     sync_once
   done &
-else
-  echo "[lsync] Fallback polling sync disabled."
 fi
 
-echo "[lsync] Starting lsyncd watcher..."
 exec lsyncd -nodaemon /etc/lsyncd.conf.lua

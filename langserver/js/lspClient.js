@@ -5,6 +5,98 @@ function createLspClient() {
   const pending   = new Map();
   const listeners = { open: [], close: [], error: [], diagnostics: [], notification: [] };
 
+function sendMessage(message) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(message));
+  return true;
+}
+
+function javaClientSettings() {
+  return {
+    java: {
+      completion: {
+        enabled: true,
+        guessMethodArguments: true
+      },
+      signatureHelp: {
+        enabled: true
+      }
+    }
+  };
+}
+
+function configurationValue(section) {
+  const settings = javaClientSettings();
+  if (!section) return settings;
+
+  let value = settings;
+  for (const part of String(section).split(".")) {
+    if (
+      value === null ||
+      typeof value !== "object" ||
+      !Object.prototype.hasOwnProperty.call(value, part)
+    ) {
+      return null;
+    }
+    value = value[part];
+  }
+
+  return value;
+}
+
+function answerServerRequest(msg) {
+  let result = null;
+
+  switch (msg.method) {
+    case "workspace/configuration": {
+      const items = Array.isArray(msg.params?.items)
+        ? msg.params.items
+        : [];
+
+      result = items.map(item =>
+        configurationValue(item?.section)
+      );
+      break;
+    }
+
+    case "workspace/workspaceFolders": {
+      const rootUri =
+        typeof SmartCodeConfig !== "undefined"
+          ? SmartCodeConfig.workspace?.rootUri
+          : null;
+
+      result = rootUri
+        ? [{ uri: rootUri, name: "workspace" }]
+        : null;
+      break;
+    }
+
+    case "workspace/applyEdit":
+      result = {
+        applied: false,
+        failureReason: "Client-side workspace edits are not supported."
+      };
+      break;
+
+    case "client/registerCapability":
+    case "client/unregisterCapability":
+    case "window/workDoneProgress/create":
+    case "window/showMessageRequest":
+      result = null;
+      break;
+
+    default:
+      result = null;
+      break;
+  }
+
+  sendMessage({
+    jsonrpc: "2.0",
+    id: msg.id,
+    result
+  });
+}
+
 function emit(type, payload) {
    for (const cb of listeners[type]) {
       try { cb(payload); } catch (e) { console.error("LSP listener error:", e); }
@@ -34,6 +126,17 @@ function connect(url) {
         try { msg = JSON.parse(event.data); }
         catch (e) { console.error("Bad LSP JSON:", e); return; }
 
+        /*
+         * LSP strežnik lahko tudi sam pošlje request z id-jem
+         * (npr. client/registerCapability in workspace/configuration).
+         * Tak request ni odgovor na naš pending request in mu moramo
+         * odgovoriti, sicer JDTLS obstane v delno inicializiranem stanju.
+         */
+        if (typeof msg.id !== "undefined" && msg.method) {
+          answerServerRequest(msg);
+          return;
+        }
+
         if (typeof msg.id !== "undefined") {
           const p = pending.get(msg.id);
           if (p) {
@@ -59,13 +162,13 @@ function connect(url) {
 function sendRequest(method, params) {
     if (!isReady()) return Promise.reject(new Error("LSP not connected"));
     const id = nextId++;
-    socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+    sendMessage({ jsonrpc: "2.0", id, method, params });
     return new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
   }
 
   function sendNotification(method, params) {
     if (!isReady()) return;
-    socket.send(JSON.stringify({ jsonrpc: "2.0", method, params }));
+    sendMessage({ jsonrpc: "2.0", method, params });
   }
 
   function isReady() {

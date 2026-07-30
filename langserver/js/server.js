@@ -11,7 +11,7 @@ import {
   statSync,
   watch
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, basename, extname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
@@ -19,6 +19,7 @@ const execFileAsync = promisify(execFile);
 
 const LSYNC_ROOT     = process.env.LSYNC_ROOT || "/algator_lsync_root";
 const WORKSPACE      = LSYNC_ROOT;
+const ALGATOR_RUNTIME_ROOT = process.env.ALGATOR_RUNTIME_ROOT || "/algator_runtime";
 let   projectFolder  = normalizeSyncRoot(process.env.PROJECT_FOLDER || "");
 
 function normalizePath(p) {
@@ -161,7 +162,7 @@ function addJavaSourceFolderForFile(relPath, content = null) {
 
 function autoDetectJavaSourceFolders() {
   const detected = new Set();
-  const skip = new Set([".git", ".metadata", ".settings", "java-data", "bin", "build", "node_modules"]);
+  const skip = new Set([".git", ".metadata", ".settings", ".smartcode-runtime", "java-data", "bin", "build", "node_modules"]);
 
   function walk(dir, rel = "") {
     let entries;
@@ -179,7 +180,11 @@ function autoDetectJavaSourceFolders() {
     }
   }
 
-  walk(WORKSPACE, "");
+  // Če je aktiven projectFolder (npr. SINGLE način), omeji zaznavanje samo
+  // na ta projekt - sicer se v isti jdtls workspace pomešajo razredi iz
+  // vseh ostalih projektov (npr. podvojen "Main" v default packageu).
+  const scopeRoot = projectFolder ? join(WORKSPACE, projectFolder) : WORKSPACE;
+  walk(scopeRoot, projectFolder);
   return [...detected].sort();
 }
 
@@ -207,21 +212,74 @@ function classpathEntryForSourceFolder(folder, allFolders) {
 
 // Jar datoteke v <algator_lsync_root>
 function findJarEntries() {
-  const jars = [];
-  function walk(dir, rel = "") {
+  const jars = new Set();
+
+  function walk(dir, valueForFile) {
     let entries;
     try { entries = readdirSync(dir); } catch { return; }
+
     for (const name of entries) {
       const abs = join(dir, name);
-      const relPath = rel ? rel + "/" + name : name;
+
       let st;
       try { st = statSync(abs); } catch { continue; }
-      if (st.isDirectory()) walk(abs, relPath);
-      else if (name.toLowerCase().endsWith(".jar")) jars.push(relPath);
+
+      if (st.isDirectory()) {
+        walk(abs, valueForFile);
+      } else if (
+        st.isFile() &&
+        name.toLowerCase().endsWith(".jar")
+      ) {
+        jars.add(valueForFile(abs));
+      }
     }
   }
-  walk(WORKSPACE, "");
-  return jars;
+
+  if (existsSync(ALGATOR_RUNTIME_ROOT)) {
+    walk(ALGATOR_RUNTIME_ROOT, absolutePath => absolutePath);
+  }
+
+  if (projectFolder) {
+    const selectedProjectRoot = join(WORKSPACE, projectFolder);
+
+    if (existsSync(selectedProjectRoot)) {
+      walk(
+        selectedProjectRoot,
+        absolutePath =>
+          relative(WORKSPACE, absolutePath).replace(/\\/g, "/")
+      );
+    }
+  } else {
+    let entries = [];
+
+    try {
+      entries = readdirSync(WORKSPACE);
+    } catch {}
+
+    for (const name of entries) {
+      if (!name.startsWith("PROJ-")) continue;
+
+      const projectRoot = join(WORKSPACE, name);
+
+      try {
+        if (statSync(projectRoot).isDirectory()) {
+          walk(
+            projectRoot,
+            absolutePath =>
+              relative(WORKSPACE, absolutePath).replace(/\\/g, "/")
+          );
+        }
+      } catch {}
+    }
+  }
+
+  return [...jars].sort();
+}
+
+function jarAbsolutePath(jarPath) {
+  return jarPath.startsWith("/")
+    ? jarPath
+    : join(WORKSPACE, jarPath);
 }
 
 const JAVA_DATA_DIR = process.env.JDTLS_DATA_DIR || "/tmp/jdtls-data";
@@ -232,25 +290,55 @@ mkdirSync(WORKSPACE, { recursive: true });
 mkdirSync(JAVA_DATA_DIR, { recursive: true });
 mkdirSync(SETTINGS_DIR, { recursive: true });
 
+function writeFileIfChanged(filePath, content) {
+  let current = null;
+
+  try {
+    current = readFileSync(filePath, "utf8");
+  } catch {}
+
+  if (current === content) return false;
+
+  writeFileSync(filePath, content, "utf8");
+  return true;
+}
+
 function bootstrapJavaProject() {
-  const projectFile  = join(WORKSPACE, ".project");
+  const projectFile = join(WORKSPACE, ".project");
   const classpathFile = join(WORKSPACE, ".classpath");
-  const prefsFile    = join(SETTINGS_DIR, "org.eclipse.jdt.core.prefs");
+  const prefsFile = join(
+    SETTINGS_DIR,
+    "org.eclipse.jdt.core.prefs"
+  );
 
   const sourceFolders = getJavaSourceFolders();
+
   for (const folder of sourceFolders) {
-    if (folder) mkdirSync(join(WORKSPACE, folder), { recursive: true });
+    if (folder) {
+      mkdirSync(join(WORKSPACE, folder), {
+        recursive: true
+      });
+    }
   }
 
   const sourceEntries = sourceFolders
-    .map(folder => classpathEntryForSourceFolder(folder, sourceFolders))
+    .map(folder =>
+      classpathEntryForSourceFolder(
+        folder,
+        sourceFolders
+      )
+    )
     .join("\n");
 
-  const jarEntries = findJarEntries()
-    .map(rel => `  <classpathentry kind="lib" path="${escapeXml(rel)}"/>`)
+  const jars = findJarEntries();
+
+  const jarEntries = jars
+    .map(rel =>
+      `  <classpathentry kind="lib" path="${escapeXml(rel)}"/>`
+    )
     .join("\n");
 
-  writeFileSync(projectFile, `<?xml version="1.0" encoding="UTF-8"?>
+  const projectContent = `<?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
   <name>smartcode</name>
   <comment></comment>
@@ -265,27 +353,83 @@ function bootstrapJavaProject() {
     <nature>org.eclipse.jdt.core.javanature</nature>
   </natures>
 </projectDescription>
-`, "utf8");
+`;
 
-  writeFileSync(classpathFile, `<?xml version="1.0" encoding="UTF-8"?>
+  const classpathContent = `<?xml version="1.0" encoding="UTF-8"?>
 <classpath>
 ${sourceEntries}
 ${jarEntries}
   <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
   <classpathentry kind="output" path="bin"/>
 </classpath>
-`, "utf8");
+`;
 
-  writeFileSync(prefsFile, `eclipse.preferences.version=1
+  const prefsContent = `eclipse.preferences.version=1
 org.eclipse.jdt.core.compiler.codegen.targetPlatform=17
 org.eclipse.jdt.core.compiler.compliance=17
 org.eclipse.jdt.core.compiler.source=17
-`, "utf8");
+`;
 
-  mkdirSync(join(WORKSPACE, "bin"), { recursive: true });
-  console.log(`[java] source folders: ${sourceFolders.map(f => f || "/").join(", ")}`);
-  const jars = findJarEntries();
-  if (jars.length) console.log(`[java] jar files: ${jars.join(", ")}`);
+  writeFileIfChanged(projectFile, projectContent);
+  const classpathChanged = writeFileIfChanged(
+    classpathFile,
+    classpathContent
+  );
+  writeFileIfChanged(prefsFile, prefsContent);
+
+  mkdirSync(join(WORKSPACE, "bin"), {
+    recursive: true
+  });
+
+  console.log(
+    `[java] source folders: ${
+      sourceFolders.map(folder => folder || "/").join(", ")
+    }`
+  );
+
+  console.log(
+    `[java] classpath JARs (${jars.length}): ${
+      jars.join(", ")
+    }`
+  );
+
+  if (
+    !jars.some(path =>
+      path.replace(/\\/g, "/")
+        .endsWith("/ALGator.jar")
+    )
+  ) {
+    console.warn(
+      "[java] ALGator.jar ni najden v classpathu."
+    );
+  }
+
+  if (classpathChanged && jdtls.isReady()) {
+    notifyJdtlsFileChanged(".classpath");
+
+    for (const client of javaClients) {
+      if (!client.initialized) continue;
+
+      client.sendNotification(
+        "workspace/didChangeConfiguration",
+        {
+          settings: {
+            java: {
+              project: {
+                referencedLibraries: jars.map(jarAbsolutePath)
+              }
+            }
+          }
+        }
+      );
+    }
+  }
+
+  return {
+    sourceFolders,
+    jars,
+    classpathChanged
+  };
 }
 
 function scanWorkspaceFiles(folder = "") {
@@ -306,6 +450,88 @@ function scanWorkspaceFiles(folder = "") {
   }
   walk(root, folder);
   return results.sort();
+}
+
+
+const EMBEDDED_SOURCE_EXTENSIONS = new Set([".java", ".c", ".cpp", ".cc", ".cxx"]);
+
+function sourceLanguageForPath(filePath) {
+  const ext = extname(filePath).toLowerCase();
+  if (ext === ".java") return "java";
+  if (ext === ".c") return "c";
+  if (ext === ".cpp" || ext === ".cc" || ext === ".cxx") return "cpp";
+  return null;
+}
+
+function normalizeEmbeddedProjectFolder(projectName) {
+  let folder = normalizeSyncRoot(projectName || "");
+  if (!folder) return "";
+  if (!folder.startsWith("PROJ-")) folder = `PROJ-${folder}`;
+  if (folder.includes("/")) return "";
+  return folder;
+}
+
+function findEmbeddedSourceFile(projectName, algorithmName) {
+  const projectFolder = normalizeEmbeddedProjectFolder(projectName);
+  const algorithm = String(algorithmName || "").trim();
+  if (!projectFolder || !algorithm) return null;
+
+  const projectRoot = safeJoin(LSYNC_ROOT, projectFolder);
+  if (!projectRoot || !existsSync(projectRoot)) return null;
+
+  const algorithmLower = algorithm.toLowerCase();
+  const compactAlgorithm = algorithmLower.replace(/[^a-z0-9_]+/g, "");
+  const skippedDirectories = new Set([".git", "node_modules", "bin", "build", "results"]);
+  const candidates = [];
+
+  function walk(directory) {
+    let entries;
+    try { entries = readdirSync(directory, { withFileTypes: true }); }
+    catch { return; }
+
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+      const absolutePath = join(directory, entry.name);
+
+      if (entry.isDirectory()) {
+        if (!skippedDirectories.has(entry.name.toLowerCase())) walk(absolutePath);
+        continue;
+      }
+
+      if (!entry.isFile()) continue;
+      const extension = extname(entry.name).toLowerCase();
+      if (!EMBEDDED_SOURCE_EXTENSIONS.has(extension)) continue;
+
+      const projectRelativePath = relative(projectRoot, absolutePath).replace(/\\/g, "/");
+      const lowerPath = projectRelativePath.toLowerCase();
+      const stem = basename(entry.name, extension).toLowerCase();
+      const compactStem = stem.replace(/[^a-z0-9_]+/g, "");
+      const segments = lowerPath.split("/");
+
+      let score = 0;
+      if (stem === algorithmLower || compactStem === compactAlgorithm) score += 1000;
+      if (segments.includes(algorithmLower)) score += 700;
+      if (segments.some(segment => segment.replace(/[^a-z0-9_]+/g, "") === compactAlgorithm)) score += 650;
+      if (lowerPath.startsWith("algs/")) score += 250;
+      if (lowerPath.includes("/src/")) score += 80;
+      if (stem.includes(algorithmLower) || compactStem.includes(compactAlgorithm)) score += 120;
+
+      if (score > 0) {
+        candidates.push({
+          score,
+          projectFolder,
+          projectRelativePath,
+          workspaceRelativePath: `${projectFolder}/${projectRelativePath}`,
+          absolutePath,
+          language: sourceLanguageForPath(projectRelativePath)
+        });
+      }
+    }
+  }
+
+  walk(projectRoot);
+  candidates.sort((a, b) => b.score - a.score || a.projectRelativePath.length - b.projectRelativePath.length);
+  return candidates[0] || null;
 }
 
 //LSP procesa
@@ -494,6 +720,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.projectFolder || data.folder || "");
+      if (newFolder !== projectFolder) activeJavaSourceFolders.clear();
       projectFolder = newFolder;
       console.log(`[server] projectFolder nastavljen na: ${projectFolder || "/"}`);
       await syncLsyncToWorkspace();
@@ -514,6 +741,7 @@ const server = http.createServer(async (req, res) => {
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.syncRoot || data.folder || "");
       if (newFolder) {
+        if (newFolder !== projectFolder) activeJavaSourceFolders.clear();
         projectFolder = newFolder;
         if (data.folder) addJavaSourceFolder(data.folder);
       }
@@ -549,6 +777,39 @@ const server = http.createServer(async (req, res) => {
       bootstrapJavaProject();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, javaSourceFolders: getJavaSourceFolders() }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "GET" && req.url?.startsWith("/resolve-embedded-file")) {
+    try {
+      const requestUrl = new URL(req.url, "http://localhost");
+      const projectName = requestUrl.searchParams.get("project") || "";
+      const algorithmName = requestUrl.searchParams.get("algorithm") || "";
+      const source = findEmbeddedSourceFile(projectName, algorithmName);
+
+      if (!source) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({
+          ok: false,
+          error: `Datoteke za algoritem '${algorithmName}' v projektu '${projectName}' ni mogoče najti v lsync mapi.`
+        }));
+        return;
+      }
+
+      const content = readFileSync(source.absolutePath, "utf8");
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      res.end(JSON.stringify({
+        ok: true,
+        projectFolder: source.projectFolder,
+        relativePath: source.projectRelativePath,
+        workspacePath: source.workspaceRelativePath,
+        language: source.language,
+        content
+      }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -624,6 +885,33 @@ const server = http.createServer(async (req, res) => {
     const folder = normalizeSyncRoot(scanUrl.searchParams.get("folder") || "");
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ files: scanWorkspaceFiles(folder) }));
+    return;
+  }
+
+  if (req.method === "GET" && req.url === "/java-classpath") {
+    try {
+      const state = bootstrapJavaProject();
+
+      res.writeHead(200, {
+        "Content-Type": "application/json"
+      });
+
+      res.end(JSON.stringify({
+        projectFolder,
+        sourceFolders: state.sourceFolders,
+        jars: state.jars
+      }));
+    } catch (e) {
+      res.writeHead(500, {
+        "Content-Type": "application/json"
+      });
+
+      res.end(JSON.stringify({
+        ok: false,
+        error: e.message
+      }));
+    }
+
     return;
   }
 
@@ -748,10 +1036,16 @@ if (JAVA_CLASSPATH_REFRESH_MS > 0) {
 setupWss(wssClangd, clangd, clangdClients, "clangd");
 setupWss(wssJava,   jdtls,  javaClients,   "jdtls");
 
+/*
+ * .project in .classpath morata obstajati že pred zagonom JDTLS.
+ * Tako JDTLS ob prvem uvozu projekta takoj vidi ALGator.jar,
+ * projektne JAR-e in vse Java source mape.
+ */
+bootstrapJavaProject();
+
 clangd.start();
 jdtls.start();
 
-bootstrapJavaProject();
 watchLsyncRoot();
 
 server.listen(3000, () => {

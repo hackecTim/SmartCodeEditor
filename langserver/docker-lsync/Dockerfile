@@ -14,10 +14,10 @@ WORKDIR /app
 COPY start-lsync.sh /app/start-lsync.sh
 COPY lsyncd.conf.lua /etc/lsyncd.conf.lua
 
-# Pomembno za Windows: odstrani CRLF in nastavi pravice.
-RUN sed -i 's/\r$//' /app/start-lsync.sh && chmod +x /app/start-lsync.sh \
-    && mkdir -p /algator_projects /algator_lsync_root /var/log/lsyncd
+RUN sed -i 's/\r$//' /app/start-lsync.sh \
+    && chmod +x /app/start-lsync.sh \
+    && mkdir -p /algator_root/data_root/projects /algator_lsync_root /var/log/lsyncd
 
-VOLUME ["/algator_projects", "/algator_lsync_root"]
+VOLUME ["/algator_root", "/algator_lsync_root"]
 
 CMD ["/bin/bash", "/app/start-lsync.sh"]
