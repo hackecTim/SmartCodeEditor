@@ -542,6 +542,17 @@ function createLspProcess(name, getArgs, clients) {
   let initialized = false;
   let initResult  = null;
   let buf         = Buffer.alloc(0);
+  let initializeRequest = null;
+  let initializedNotification = {
+    jsonrpc: "2.0",
+    method: "initialized",
+    params: {}
+  };
+  let configurationNotification = null;
+  let restartState = null;
+  let restartId = null;
+  let restartSequence = 0;
+  const pendingMessages = [];
 
   function broadcast(msg) {
     const data = JSON.stringify(msg);
@@ -551,14 +562,23 @@ function createLspProcess(name, getArgs, clients) {
   }
 
   function sendRaw(obj) {
-    if (!proc || !procReady) return;
+    if (!proc || !procReady) return false;
     try {
       const json = JSON.stringify(obj);
       const body = Buffer.from(json, "utf8");
       const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii");
       proc.stdin.write(Buffer.concat([header, body]));
+      return true;
     } catch (e) {
       if (e.code !== "EPIPE") console.error(`[${name}] send error:`, e.message);
+      return false;
+    }
+  }
+
+  function flushPendingMessages() {
+    while (pendingMessages.length) {
+      const item = pendingMessages.shift();
+      sendRaw(item.msg);
     }
   }
 
@@ -567,9 +587,17 @@ function createLspProcess(name, getArgs, clients) {
     const id     = msg.id;
 
     if (method === "initialize") {
+      initializeRequest = msg;
+
       if (initialized && initResult !== null) {
-        ws.send(JSON.stringify({ jsonrpc: "2.0", id, result: initResult }));
+        ws.send(JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          result: initResult
+        }));
         console.log(`[${name}] replayed initialize to reconnected client`);
+      } else if (restartState) {
+        restartState.initializeClients.push({ ws, id });
       } else {
         sendRaw(msg);
       }
@@ -577,56 +605,138 @@ function createLspProcess(name, getArgs, clients) {
     }
 
     if (method === "initialized") {
-      if (!initialized) sendRaw(msg);
+      initializedNotification = msg;
+      if (!initialized && !restartState) sendRaw(msg);
+      return;
+    }
+
+    if (method === "workspace/didChangeConfiguration") {
+      configurationNotification = msg;
+    }
+
+    if (!initialized && restartState) {
+      pendingMessages.push({ ws, msg });
       return;
     }
 
     sendRaw(msg);
   }
 
+  function finishRestart(error, result = null) {
+    const state = restartState;
+    restartState = null;
+    restartId = null;
+
+    if (!state) return;
+
+    clearTimeout(state.timeout);
+
+    if (error) {
+      state.reject(error);
+      return;
+    }
+
+    initialized = true;
+    initResult = result;
+
+    sendRaw(initializedNotification);
+
+    if (configurationNotification) {
+      sendRaw(configurationNotification);
+    }
+
+    for (const client of state.initializeClients) {
+      if (client.ws.readyState !== 1) continue;
+      client.ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id: client.id,
+        result
+      }));
+    }
+
+    flushPendingMessages();
+    state.resolve();
+  }
+
   function start() {
     let spawnArgs;
-    try { spawnArgs = getArgs(); }
-    catch (e) {
+    try {
+      spawnArgs = getArgs();
+    } catch (e) {
       console.error(`[${name}] cannot get args: ${e.message} — retrying in 5s`);
       setTimeout(start, 5000);
-      return;
+      return false;
     }
 
     const { cmd, args, opts } = spawnArgs;
+    let child;
+
     try {
-      proc      = spawn(cmd, args, opts);
+      child = spawn(cmd, args, opts);
+      proc = child;
       procReady = true;
-      buf       = Buffer.alloc(0);
+      buf = Buffer.alloc(0);
     } catch (e) {
       console.error(`[${name}] spawn failed: ${e.message} — retrying in 5s`);
       setTimeout(start, 5000);
-      return;
+      return false;
     }
 
-    console.log(`[${name}] started (pid ${proc.pid})`);
+    console.log(`[${name}] started (pid ${child.pid})`);
 
-    proc.stdout.on("data", chunk => {
+    child.stdout.on("data", chunk => {
+      if (proc !== child) return;
+
       buf = Buffer.concat([buf, chunk]);
+
       while (true) {
         const sep = buf.indexOf("\r\n\r\n");
         if (sep === -1) break;
+
         const headerStr = buf.slice(0, sep).toString("ascii");
         const match = headerStr.match(/Content-Length:\s*(\d+)/i);
-        if (!match) { buf = buf.slice(sep + 4); continue; }
+
+        if (!match) {
+          buf = buf.slice(sep + 4);
+          continue;
+        }
+
         const len = Number(match[1]);
         const bodyStart = sep + 4;
-        const bodyEnd   = bodyStart + len;
+        const bodyEnd = bodyStart + len;
+
         if (buf.length < bodyEnd) break;
+
         const bodyBuf = buf.slice(bodyStart, bodyEnd);
         buf = buf.slice(bodyEnd);
+
         try {
           const parsed = JSON.parse(bodyBuf.toString("utf8"));
-          if (parsed.id !== undefined && !initialized && parsed.result !== undefined) {
+
+          if (restartState && parsed.id === restartId) {
+            if (parsed.error) {
+              finishRestart(
+                new Error(parsed.error.message || `${name} restart failed`)
+              );
+            } else {
+              console.log(`[${name}] reinitialized successfully`);
+              finishRestart(null, parsed.result);
+            }
+            continue;
+          }
+
+          if (
+            parsed.id !== undefined &&
+            !initialized &&
+            initializeRequest &&
+            parsed.id === initializeRequest.id &&
+            parsed.result !== undefined
+          ) {
             initialized = true;
-            initResult  = parsed.result;
+            initResult = parsed.result;
             console.log(`[${name}] initialized successfully`);
           }
+
           broadcast(parsed);
         } catch (e) {
           console.error(`[${name}] bad JSON:`, e.message);
@@ -634,26 +744,124 @@ function createLspProcess(name, getArgs, clients) {
       }
     });
 
-    proc.stderr.on("data", c => process.stderr.write(`[${name}] ${c}`));
+    child.stderr.on("data", chunk => {
+      if (proc === child) {
+        process.stderr.write(`[${name}] ${chunk}`);
+      }
+    });
 
-    proc.on("exit", (code, signal) => {
-      procReady   = false;
+    child.on("exit", (code, signal) => {
+      if (proc !== child) return;
+
+      proc = null;
+      procReady = false;
       initialized = false;
-      initResult  = null;
-      console.log(`[${name}] exited (code=${code} signal=${signal}) — restarting in 2s`);
-      setTimeout(start, 2000);
+      initResult = null;
+
+      if (restartState) {
+        finishRestart(
+          new Error(`${name} exited during restart`)
+        );
+      }
+
+      console.log(
+        `[${name}] exited (code=${code} signal=${signal}) — restarting in 2s`
+      );
+
+      setTimeout(() => {
+        if (initializeRequest) {
+          restart().catch(error =>
+            console.error(`[${name}] restart failed:`, error.message)
+          );
+        } else {
+          start();
+        }
+      }, 2000);
     });
 
-    proc.stdin.on("error", e => {
-      if (e.code !== "EPIPE") console.error(`[${name}] stdin:`, e.message);
+    child.stdin.on("error", e => {
+      if (e.code !== "EPIPE") {
+        console.error(`[${name}] stdin:`, e.message);
+      }
     });
+
+    if (restartState && initializeRequest) {
+      sendRaw({
+        ...initializeRequest,
+        id: restartId
+      });
+    }
+
+    return true;
+  }
+
+  function restart() {
+    if (restartState) return restartState.promise;
+
+    initialized = false;
+    initResult = null;
+    pendingMessages.length = 0;
+
+    let resolveRestart;
+    let rejectRestart;
+
+    const promise = new Promise((resolve, reject) => {
+      resolveRestart = resolve;
+      rejectRestart = reject;
+    });
+
+    restartId = initializeRequest
+      ? `smartcode-restart-${name}-${++restartSequence}`
+      : null;
+
+    restartState = {
+      promise,
+      resolve: resolveRestart,
+      reject: rejectRestart,
+      initializeClients: [],
+      timeout: null
+    };
+
+    const child = proc;
+    proc = null;
+    procReady = false;
+    buf = Buffer.alloc(0);
+
+    if (child) {
+      try {
+        child.kill("SIGTERM");
+      } catch {}
+    }
+
+    const started = start();
+
+    if (!started) {
+      finishRestart(new Error(`${name} could not be started`));
+      return promise;
+    }
+
+    if (!initializeRequest) {
+      const state = restartState;
+      restartState = null;
+      restartId = null;
+      state.resolve();
+      return promise;
+    }
+
+    restartState.timeout = setTimeout(() => {
+      finishRestart(new Error(`${name} reinitialization timed out`));
+    }, 30000);
+
+    return promise;
   }
 
   return {
     handleClientMessage,
-    sendNotification: (method, params) => sendRaw({ jsonrpc: "2.0", method, params }),
+    sendNotification: (method, params) =>
+      sendRaw({ jsonrpc: "2.0", method, params }),
     start,
-    isReady: () => procReady
+    restart,
+    isReady: () => procReady && initialized
   };
 }
 
@@ -678,8 +886,77 @@ const clangd = createLspProcess("clangd", () => {
 
 // jdtls
 const javaClients = new Set();
+const javaOpenDocuments = new Map();
+
+function trackJavaDocument(ws, uri) {
+  if (!uri) return;
+
+  if (!ws.openDocuments) {
+    ws.openDocuments = new Set();
+  }
+
+  if (ws.openDocuments.has(uri)) return;
+
+  ws.openDocuments.add(uri);
+
+  if (!javaOpenDocuments.has(uri)) {
+    javaOpenDocuments.set(uri, new Set());
+  }
+
+  javaOpenDocuments.get(uri).add(ws);
+}
+
+function untrackJavaDocument(ws, uri, closeDocument = false) {
+  if (!uri || !ws.openDocuments?.has(uri)) return;
+
+  ws.openDocuments.delete(uri);
+
+  const owners = javaOpenDocuments.get(uri);
+  if (!owners) return;
+
+  owners.delete(ws);
+
+  if (owners.size === 0) {
+    javaOpenDocuments.delete(uri);
+
+    if (closeDocument) {
+      jdtls.sendNotification("textDocument/didClose", {
+        textDocument: { uri }
+      });
+    }
+  }
+}
+
+function closeJavaClientDocuments(ws) {
+  for (const uri of [...(ws.openDocuments || [])]) {
+    untrackJavaDocument(ws, uri, true);
+  }
+}
+
+function closeAllJavaDocuments() {
+  for (const uri of javaOpenDocuments.keys()) {
+    jdtls.sendNotification("textDocument/didClose", {
+      textDocument: { uri }
+    });
+  }
+
+  javaOpenDocuments.clear();
+
+  for (const ws of javaClients) {
+    ws.openDocuments?.clear();
+  }
+}
+
 const jdtls = createLspProcess("jdtls", () => {
   const pluginsDir = "/opt/jdtls/plugins";
+  const javaProjectData = (
+    projectFolder || "workspace"
+  ).replace(/[^A-Za-z0-9._-]/g, "_");
+  const javaDataDir = join(
+    JAVA_DATA_DIR,
+    javaProjectData
+  );
+  mkdirSync(javaDataDir, { recursive: true });
   if (!existsSync(pluginsDir)) throw new Error("jdtls not installed at /opt/jdtls");
   const launcher = readdirSync(pluginsDir)
     .find(f => f.startsWith("org.eclipse.equinox.launcher_") && f.endsWith(".jar"));
@@ -700,7 +977,7 @@ const jdtls = createLspProcess("jdtls", () => {
       "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
       "-jar", join(pluginsDir, launcher),
       "-configuration", "/opt/jdtls/config_linux",
-      "-data", JAVA_DATA_DIR
+      "-data", javaDataDir
     ],
     opts: { cwd: WORKSPACE }
   };
@@ -720,12 +997,22 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.projectFolder || data.folder || "");
-      if (newFolder !== projectFolder) activeJavaSourceFolders.clear();
+      if (newFolder !== projectFolder) {
+        closeAllJavaDocuments();
+        activeJavaSourceFolders.clear();
+      }
+      const projectChanged = newFolder !== projectFolder;
+
       projectFolder = newFolder;
       console.log(`[server] projectFolder nastavljen na: ${projectFolder || "/"}`);
       await syncLsyncToWorkspace();
       bootstrapJavaProject();
       watchLsyncRoot();
+
+      if (projectChanged) {
+        await jdtls.restart();
+      }
+
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, projectFolder, workspace: WORKSPACE }));
     } catch (e) {
@@ -740,13 +1027,27 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.syncRoot || data.folder || "");
+      const projectChanged = Boolean(
+        newFolder && newFolder !== projectFolder
+      );
+
       if (newFolder) {
-        if (newFolder !== projectFolder) activeJavaSourceFolders.clear();
+        if (projectChanged) {
+          closeAllJavaDocuments();
+          activeJavaSourceFolders.clear();
+        }
         projectFolder = newFolder;
         if (data.folder) addJavaSourceFolder(data.folder);
       }
+
       await syncLsyncToWorkspace();
       bootstrapJavaProject();
+      watchLsyncRoot();
+
+      if (projectChanged) {
+        await jdtls.restart();
+      }
+
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, projectFolder, workspace: WORKSPACE }));
     } catch (e) {
@@ -800,15 +1101,13 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
-      const content = readFileSync(source.absolutePath, "utf8");
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({
         ok: true,
         projectFolder: source.projectFolder,
         relativePath: source.projectRelativePath,
         workspacePath: source.workspaceRelativePath,
-        language: source.language,
-        content
+        language: source.language
       }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -1007,21 +1306,59 @@ server.on("upgrade", (req, socket, head) => {
 function setupWss(wss, lspProc, clientSet, name) {
   wss.on("connection", ws => {
     ws.initialized = false;
+    ws.openDocuments = new Set();
+    ws.cleanedUp = false;
     clientSet.add(ws);
     console.log(`[${name}] browser connected (${clientSet.size} active)`);
 
     ws.on("message", raw => {
       try {
         const msg = JSON.parse(raw.toString());
-        if (msg.method === "initialized") ws.initialized = true;
+
+        if (msg.method === "initialized") {
+          ws.initialized = true;
+        }
+
+        if (name === "jdtls") {
+          if (msg.method === "textDocument/didOpen") {
+            trackJavaDocument(
+              ws,
+              msg.params?.textDocument?.uri
+            );
+          } else if (msg.method === "textDocument/didClose") {
+            untrackJavaDocument(
+              ws,
+              msg.params?.textDocument?.uri
+            );
+          }
+        }
+
         lspProc.handleClientMessage(ws, msg);
       } catch (e) {
         console.error(`[${name}] bad WS message:`, e.message);
       }
     });
 
-    ws.on("close", () => { clientSet.delete(ws); console.log(`[${name}] disconnected`); });
-    ws.on("error", err => { clientSet.delete(ws); console.error(`[${name}] WS error:`, err.message); });
+    const cleanup = () => {
+      if (ws.cleanedUp) return;
+      ws.cleanedUp = true;
+
+      if (name === "jdtls") {
+        closeJavaClientDocuments(ws);
+      }
+
+      clientSet.delete(ws);
+    };
+
+    ws.on("close", () => {
+      cleanup();
+      console.log(`[${name}] disconnected`);
+    });
+
+    ws.on("error", err => {
+      cleanup();
+      console.error(`[${name}] WS error:`, err.message);
+    });
   });
 }
 

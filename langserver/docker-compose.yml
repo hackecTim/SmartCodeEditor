@@ -13,8 +13,13 @@ services:
       LSYNC_POLL_INTERVAL: "1"
       LSYNC_VERBOSE: "1"
     volumes:
-      - "${ALGATOR_ROOT}:/algator_root:ro"
-      - "../algator_lsync_root:/algator_lsync_root"
+      - type: bind
+        source: ${ALGATOR_ROOT}
+        target: /algator_root
+        read_only: true
+      - type: bind
+        source: ${ALGATOR_LSYNC}
+        target: /algator_lsync_root
     healthcheck:
       test: ["CMD-SHELL", "test -f /algator_lsync_root/.smartcode-lsync-ready"]
       interval: 2s
@@ -39,10 +44,10 @@ services:
       JAVA_CLASSPATH_REFRESH_MS: "3000"
     volumes:
       - type: bind
-        source: ../algator_lsync_root
+        source: ${ALGATOR_LSYNC}
         target: /algator_lsync_root
       - type: bind
-        source: C:/ALGATOR_ROOT/app/ALGator
+        source: ${ALGATOR_RUNTIME}
         target: /algator_runtime
         read_only: true
     depends_on:
