@@ -17,13 +17,6 @@
 //     console.log(ed.getContent());
 //   });
 //
-// EMBEDDED:
-//   var ed = smartCodeEditor.initEmbeddedEditor({
-//     divId: "my-editor",
-//     hiddenDiv: "my-hidden-textarea",
-//     height: "700px" // sprejme tudi številko: 700
-//   });
-//
 
 window.smartCodeEditor = (() => {
 
@@ -38,26 +31,6 @@ window.smartCodeEditor = (() => {
   function resolveMode(m) {
     if (typeof m === "string") return _modeMap[m.toLowerCase()] ?? 1;
     return Number(m) || 1;
-  }
-
-  function normalizeCssSize(value, fallback = null) {
-    if (value === undefined || value === null || value === "") {
-      return fallback;
-    }
-
-    return typeof value === "number"
-      ? `${value}px`
-      : String(value);
-  }
-
-  function applyEmbeddedHeight(root, value, fallback = "650px") {
-    if (!root) return;
-
-    const height = normalizeCssSize(value, fallback);
-    if (!height) return;
-
-    root.style.height = height;
-    root.style.minHeight = height;
   }
 
   const callbacks = { onChange: null, onSave: null, onFileOpen: null };
@@ -215,11 +188,7 @@ window.smartCodeEditor = (() => {
         root.style.flexDirection = "column";
         root.style.overflow      = "hidden";
 
-        applyEmbeddedHeight(
-          root,
-          this.options.height,
-          root.style.height || "100%"
-        );
+        if (!root.style.height) root.style.height = "100%";
 
         const initialContent =
           Object.prototype.hasOwnProperty.call(this.options, "content")
@@ -237,8 +206,7 @@ window.smartCodeEditor = (() => {
           saveEnabled:     this.options.saveEnabled === true,
           showDiagnostics: this.showDiagnostics,
           readOnly:        this.options.readOnly !== false,
-          content:         initialContent,
-          height:          this.options.height
+          content:         initialContent
         });
 
         this.readyState = true;
@@ -649,41 +617,6 @@ window.smartCodeEditor = (() => {
       : "http://localhost:3000";
   }
 
-  function encodeEmbeddedWorkspacePath(path) {
-    return String(path || "")
-      .replace(/\\/g, "/")
-      .split("/")
-      .filter(Boolean)
-      .map(encodeURIComponent)
-      .join("/");
-  }
-
-  function waitEmbedded(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  function inferJavaFilePath(filePath, content, language, enabled = true) {
-    if (
-      enabled === false ||
-      String(language || "").toLowerCase() !== "java" ||
-      !content
-    ) {
-      return filePath;
-    }
-
-    const match = String(content).match(
-      /\bpublic\s+(?:(?:abstract|final|sealed|non-sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)/
-    );
-
-    if (!match) return filePath;
-
-    const normalized = String(filePath || "Main.java").replace(/\\/g, "/");
-    const slash = normalized.lastIndexOf("/");
-    const folder = slash >= 0 ? normalized.slice(0, slash + 1) : "";
-
-    return `${folder}${match[1]}.java`;
-  }
-
   async function resolveEmbeddedSource(opts) {
     if (!opts.projectName || !opts.algorithmName) {
       const language = opts.language || embeddedModeToLanguage(opts.mode, "java");
@@ -691,15 +624,8 @@ window.smartCodeEditor = (() => {
         opts.projectName,
         opts.projectFolder || opts.folder || opts.project
       );
-      let savePath = opts.filePath || opts.savePath || opts.relativePath ||
+      const savePath = opts.filePath || opts.savePath || opts.relativePath ||
         ((opts.key || "Main") + ({ java: ".java", c: ".c", cpp: ".cpp" }[language] || ".java"));
-
-      savePath = inferJavaFilePath(
-        savePath,
-        opts.content,
-        language,
-        opts.inferJavaFileName !== false
-      );
 
       return {
         ...opts,
@@ -735,45 +661,6 @@ window.smartCodeEditor = (() => {
 
     const source = await response.json();
 
-    let resolvedContent = source.content ?? "";
-
-    /*
-     * Ob prvem prikazu ALGator včasih odpre panel, preden je vsebina
-     * sinhronizirane datoteke že vrnjena v resolverju. Pot je takrat
-     * pravilna (zato LSP že pokaže diagnostiko), CodeMirror pa dobi
-     * prazen niz. V tem primeru datoteko neposredno preberemo iz
-     * /workspace in nekajkrat ponovimo poskus.
-     */
-    if (
-      resolvedContent === "" &&
-      source.projectFolder &&
-      source.relativePath
-    ) {
-      const workspacePath = encodeEmbeddedWorkspacePath(
-        `${source.projectFolder}/${source.relativePath}`
-      );
-
-      for (let attempt = 0; attempt < 10; attempt++) {
-        try {
-          const fileResponse = await fetch(
-            `${getServerHttpUrl()}/workspace/${workspacePath}`,
-            { cache: "no-store" }
-          );
-
-          if (fileResponse.ok) {
-            const fileContent = await fileResponse.text();
-
-            if (fileContent !== "") {
-              resolvedContent = fileContent;
-              break;
-            }
-          }
-        } catch {}
-
-        await waitEmbedded(100);
-      }
-    }
-
     return {
       ...opts,
       language: source.language,
@@ -782,13 +669,12 @@ window.smartCodeEditor = (() => {
       folder: source.projectFolder,
       syncRoot: source.projectFolder,
       savePath: source.relativePath,
-      content: resolvedContent,
+      content: Object.prototype.hasOwnProperty.call(opts, "content")
+        ? (opts.content ?? "")
+        : "",
       lsyncEnabled: true,
       saveEnabled: false,
-      resolvedSource: {
-        ...source,
-        content: resolvedContent
-      }
+      resolvedSource: source
     };
   }
 
@@ -965,14 +851,8 @@ window.smartCodeEditor = (() => {
         waitUntilVisible();
       },
       setSize(width, height) {
-        if (width !== undefined && width !== null && width !== "") {
-          root.style.width = normalizeCssSize(width);
-        }
-
-        if (height !== undefined && height !== null && height !== "") {
-          applyEmbeddedHeight(root, height);
-        }
-
+        if (width) root.style.width = width;
+        if (height) root.style.height = height;
         refreshEditor();
         waitUntilVisible();
       },
@@ -1083,14 +963,8 @@ window.smartCodeEditor = (() => {
         activeAdapter?.refresh?.();
       },
       setSize(width, height) {
-        if (width !== undefined && width !== null && width !== "") {
-          root.style.width = normalizeCssSize(width);
-        }
-
-        if (height !== undefined && height !== null && height !== "") {
-          applyEmbeddedHeight(root, height);
-        }
-
+        if (width) root.style.width = width;
+        if (height) root.style.height = height;
         activeAdapter?.setSize?.(width, height);
       },
       setOption(option, value) {
@@ -1172,12 +1046,8 @@ window.smartCodeEditor = (() => {
     root.style.display = "flex";
     root.style.flexDirection = "column";
     root.style.overflow = "hidden";
-
-    applyEmbeddedHeight(
-      root,
-      opts.height,
-      root.style.height || "650px"
-    );
+    root.style.minHeight = opts.height || root.style.minHeight || "500px";
+    root.style.height = opts.height || root.style.height || "650px";
 
     const deferred = createDeferredEmbeddedAdapter(root, hiddenEl, opts);
 

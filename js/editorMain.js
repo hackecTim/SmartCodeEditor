@@ -107,10 +107,26 @@ function compactDiagnosticMessage(message) {
   return text;
 }
 
+function isDependencyNoiseDiagnostic(diag) {
+  const message = String(diag?.message || "").trim();
+
+  return [
+    /^The import .+ cannot be resolved$/i,
+    /^.+ cannot be resolved to a type$/i,
+    /^The type .+ cannot be resolved$/i,
+    /^The hierarchy of the type .+ is inconsistent$/i,
+    /^The method .+ must override or implement a supertype method$/i,
+    /^A method cannot override or implement a supertype method$/i,
+    /^The method .+ is undefined for the type .+$/i,
+    /^The constructor .+ is undefined$/i,
+    /^.+ cannot be resolved$/i
+  ].some(pattern => pattern.test(message));
+}
+
 function compactDiagnostics(diagnostics) {
   const seen = new Set();
 
-  return (diagnostics || [])
+  const unique = (diagnostics || [])
     .filter(diag => diag && (diag.severity === 1 || diag.severity === 2))
     .filter(diag => {
       const start = diag.range?.start || {};
@@ -128,6 +144,23 @@ function compactDiagnostics(diagnostics) {
       seen.add(key);
       return true;
     });
+
+  const hasDependencyProblem = unique.some(diag => {
+    const message = String(diag?.message || "").trim();
+
+    return [
+      /^The import .+ cannot be resolved$/i,
+      /^.+ cannot be resolved to a type$/i,
+      /^The type .+ cannot be resolved$/i,
+      /^The hierarchy of the type .+ is inconsistent$/i
+    ].some(pattern => pattern.test(message));
+  });
+
+  if (!hasDependencyProblem) {
+    return unique;
+  }
+
+  return unique.filter(diag => !isDependencyNoiseDiagnostic(diag));
 }
 
 function groupDiagnosticsForPanel(diagnostics) {
@@ -528,7 +561,10 @@ async function ensureEmbeddedServerProjectFolder(projectFolder) {
   const folder = normalizePath(projectFolder || "").replace(/\/+$/, "");
   if (!folder || embeddedServerProjectFolder === folder) return true;
   const ok = await setServerProjectFolder(folder);
-  if (ok) embeddedServerProjectFolder = folder;
+  if (ok) {
+    _embeddedJavaDocs.clear();
+    embeddedServerProjectFolder = folder;
+  }
   return ok;
 }
 
@@ -2555,6 +2591,11 @@ function setAutosaveInfo(t, c) {
 */
 
 let _algatorIdCounter = 0;
+const _embeddedJavaDocs = new Map();
+
+onJavaLspClose(() => {
+  _embeddedJavaDocs.clear();
+});
 
 function _waitLspInit(isJava) {
   return new Promise(resolve => {
@@ -2855,22 +2896,99 @@ this._connectLsp();
 
   _openInLsp() {
     if (!this._lspReady()) return;
+
+    const text = this.cm.getValue();
+
+    if (this._isJava()) {
+      const current = _embeddedJavaDocs.get(this.uri);
+
+      if (!current) {
+        const version = Math.max(1, this._version);
+
+        _embeddedJavaDocs.set(this.uri, {
+          version,
+          text,
+          owners: new Set([this.id]),
+          context: false
+        });
+
+        this._version = version;
+
+        this._lspNotify("textDocument/didOpen", {
+          textDocument: {
+            uri: this.uri,
+            languageId: this._langId(),
+            version,
+            text
+          }
+        });
+
+        return;
+      }
+
+      current.owners.add(this.id);
+      this._version = Math.max(this._version, current.version);
+
+      if (current.text !== text) {
+        current.version++;
+        current.text = text;
+        this._version = current.version;
+
+        this._lspNotify("textDocument/didChange", {
+          textDocument: {
+            uri: this.uri,
+            version: current.version
+          },
+          contentChanges: [{ text }]
+        });
+      }
+
+      return;
+    }
+
     this._lspNotify("textDocument/didOpen", {
       textDocument: {
-        uri:        this.uri,
+        uri: this.uri,
         languageId: this._langId(),
-        version:    this._version,
-        text:       this.cm.getValue()
+        version: this._version,
+        text
       }
     });
   }
 
   _notifyLspChange() {
     if (!this._lspReady()) return;
+
+    const text = this.cm.getValue();
+
+    if (this._isJava()) {
+      const current = _embeddedJavaDocs.get(this.uri);
+
+      if (!current) {
+        this._openInLsp();
+        return;
+      }
+
+      current.owners.add(this.id);
+      current.version++;
+      current.text = text;
+      this._version = current.version;
+
+      this._lspNotify("textDocument/didChange", {
+        textDocument: {
+          uri: this.uri,
+          version: current.version
+        },
+        contentChanges: [{ text }]
+      });
+
+      return;
+    }
+
     this._version++;
     this._lspNotify("textDocument/didChange", {
-      textDocument:   { uri: this.uri, version: this._version },
-      contentChanges: [{ text: this.cm.getValue() }]
+      textDocument: { uri: this.uri, version: this._version },
+      contentChanges: [{ text }]
     });
   }
 
@@ -3344,6 +3462,39 @@ this._connectLsp();
           const langId  = lf.endsWith(".java") ? "java" : lf.endsWith(".cpp") || lf.endsWith(".cc") || lf.endsWith(".cxx") ? "cpp" : "c";
           const fUri    = uriForFile(f);
 
+          if (isJavaSelf) {
+            const current = _embeddedJavaDocs.get(fUri);
+
+            if (current) {
+              current.context = true;
+
+              if (
+                current.owners.size === 0 &&
+                current.text !== text
+              ) {
+                current.version++;
+                current.text = text;
+
+                this._lspNotify("textDocument/didChange", {
+                  textDocument: {
+                    uri: fUri,
+                    version: current.version
+                  },
+                  contentChanges: [{ text }]
+                });
+              }
+
+              continue;
+            }
+
+            _embeddedJavaDocs.set(fUri, {
+              version: 1,
+              text,
+              owners: new Set(),
+              context: true
+            });
+          }
+
           this._lspNotify("textDocument/didOpen", {
             textDocument: { uri: fUri, languageId: langId, version: 1, text }
           });
@@ -3368,14 +3519,7 @@ this._connectLsp();
     this.cm.setValue(code ?? "");
 
     if (this._lspReady()) {
-      this._lspNotify("textDocument/didOpen", {
-        textDocument: {
-          uri:        this.uri,
-          languageId: this._langId(),
-          version:    this._version,
-          text:       code ?? ""
-        }
-      });
+      this._openInLsp();
     }
 
     if (this.saveEnabled && hasServerSupport()) {
@@ -3431,7 +3575,24 @@ this._connectLsp();
 
   destroy() {
         if (this._lspReady()) {
-      this._lspNotify("textDocument/didClose", { textDocument: { uri: this.uri } });
+      if (this._isJava()) {
+        const current = _embeddedJavaDocs.get(this.uri);
+
+        if (current) {
+          current.owners.delete(this.id);
+
+          if (!current.context && current.owners.size === 0) {
+            this._lspNotify("textDocument/didClose", {
+              textDocument: { uri: this.uri }
+            });
+            _embeddedJavaDocs.delete(this.uri);
+          }
+        }
+      } else {
+        this._lspNotify("textDocument/didClose", {
+          textDocument: { uri: this.uri }
+        });
+      }
     }
     this._hideSignatureHint();
     this._sigEl?.remove?.();
