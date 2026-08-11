@@ -194,55 +194,54 @@ body {
 .autosave-fail    { color: #e74c3c; font-weight: 600; }
 
 .cm-lsp-error {
-  background: rgba(255, 0, 0, 0.08);
-  border-bottom: 2px wavy #e74c3c;
+  background: transparent;
+  text-decoration: underline wavy #f14c4c 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
 }
 
 .cm-lsp-warning {
-  background: rgba(255, 165, 0, 0.08);
-  border-bottom: 2px wavy #f39c12;
+  background: transparent;
+  text-decoration: underline wavy #cca700 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
 }
 
 .cm-lsp-info {
-  background: rgba(45, 108, 223, 0.08);
-  border-bottom: 2px wavy #2d6cdf;
+  background: transparent;
+  text-decoration: underline wavy #3794ff 1.5px;
+  text-underline-offset: 3px;
+  text-decoration-skip-ink: none;
 }
 
 .cm-lsp-hint {
-  background: rgba(140, 140, 140, 0.08);
-  border-bottom: 2px dotted #888;
-}
-
-.cm-diagnostic-line-error {
-  background: rgba(255, 0, 0, 0.03);
-}
-
-.cm-diagnostic-line-warning {
-  background: rgba(255, 165, 0, 0.04);
-}
-
-.cm-diagnostic-line-info {
-  background: rgba(45, 108, 223, 0.03);
-}
-
-.cm-diagnostic-line-hint {
-  background: rgba(120, 120, 120, 0.03);
+  background: transparent;
+  text-decoration: underline dotted #8c8c8c 1.5px;
+  text-underline-offset: 3px;
 }
 
 .cm-diagnostic-gutter-marker {
-  font-size: 12px;
-  line-height: 1;
-  text-align: center;
   width: 14px;
-  margin-left: 2px;
+  height: 14px;
+  margin: 2px 1px 0 1px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
 }
 
 .cm-diagnostic-gutter-marker.is-error {
-  color: #e74c3c;
+  color: #fff;
+  background: #f14c4c;
+  border-radius: 50%;
 }
 
 .cm-diagnostic-gutter-marker.is-warning {
-  color: #f39c12;
+  color: #cca700;
+  font-size: 13px;
 }
 
 .cm-diagnostic-gutter-marker.is-info {
@@ -418,13 +417,13 @@ body {
 
 .diagnostics-panel {
   width: 88%;
-  min-height: 120px;
-  max-height: 180px;
+  min-height: 0;
+  max-height: 220px;
   margin: 0 auto 10px auto;
-  background: #fff;
-  border: 1px solid #e3e3e3;
-  border-radius: 10px;
-  box-shadow: 0 4px 14px rgba(0,0,0,0.04);
+  background: #ffffff;
+  border: 1px solid #d4d4d4;
+  border-radius: 4px;
+  box-shadow: none;
   overflow: hidden;
   flex-shrink: 0;
 }
@@ -434,9 +433,10 @@ body {
   justify-content: space-between;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid #eee;
-  background: #fafafa;
+  min-height: 31px;
+  padding: 5px 10px;
+  border-bottom: 1px solid #d4d4d4;
+  background: #f8f8f8;
 }
 
 .diagnostics-title {
@@ -446,12 +446,43 @@ body {
 }
 
 .diagnostics-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
   font-size: 12px;
-  color: #666;
+  color: #616161;
+}
+
+.diagnostics-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.diagnostics-summary-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+}
+
+.diagnostics-summary.is-error .diagnostics-summary-icon {
+  color: #fff;
+  background: #f14c4c;
+  border-radius: 50%;
+}
+
+.diagnostics-summary.is-warning .diagnostics-summary-icon {
+  color: #cca700;
+  font-size: 13px;
 }
 
 .diagnostics-list {
-  max-height: 132px;
+  max-height: 188px;
   overflow-y: auto;
 }
 
@@ -466,47 +497,87 @@ body {
   border: none;
   background: #fff;
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 10px 14px;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 4px 8px;
   text-align: left;
   cursor: pointer;
-  border-top: 1px solid #f2f2f2;
+  border-top: 1px solid #f0f0f0;
+  color: #3b3b3b;
 }
 
 .diagnostic-item:hover {
-  background: #f7f9fc;
+  background: #e8e8e8;
+}
+
+.diagnostic-item:focus-visible {
+  outline: 1px solid #007acc;
+  outline-offset: -1px;
 }
 
 .diagnostic-severity {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  margin-top: 4px;
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 16px;
   flex-shrink: 0;
 }
 
-.diagnostic-severity.error { background: #e74c3c; }
-.diagnostic-severity.warning { background: #f39c12; }
-.diagnostic-severity.info { background: #2d6cdf; }
-.diagnostic-severity.hint { background: #7f8c8d; }
+.diagnostic-severity.error {
+  color: #fff;
+  background: #f14c4c;
+  border-radius: 50%;
+}
+.diagnostic-severity.warning { color: #cca700; font-size: 15px; }
+.diagnostic-severity.info {
+  color: #fff;
+  background: #3794ff;
+  border-radius: 50%;
+}
+.diagnostic-severity.hint { color: #6c6c6c; }
 
 .diagnostic-main {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: baseline;
+  gap: 7px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .diagnostic-message {
   font-size: 13px;
-  color: #222;
-  line-height: 1.35;
+  color: #3b3b3b;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .diagnostic-meta {
   font-size: 12px;
-  color: #777;
+  color: #777777;
+  white-space: nowrap;
+}
+
+.diagnostic-meta:empty {
+  display: none;
+}
+
+.diagnostic-occurrences::before {
+  content: " • ";
+}
+
+.diagnostic-location {
+  margin-left: auto;
+  font-size: 12px;
+  color: #6c6c6c;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 @media (max-width: 900px) {
