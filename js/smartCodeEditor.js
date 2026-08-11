@@ -130,6 +130,7 @@ window.smartCodeEditor = (() => {
       this.options.syncRoot = this.syncRoot;
       this.options.lsyncEnabled = this.lsyncEnabled;
       this.readyState       = false;
+      this.readyPromise     = null;
       this.embeddedEditorInstance = null;
 
       if (this.mode === 3) {
@@ -209,29 +210,34 @@ window.smartCodeEditor = (() => {
           content:         initialContent
         });
 
-        this.readyState = true;
+        const instance = this.embeddedEditorInstance;
+        this.readyPromise = Promise.resolve(
+          typeof instance?.whenReady === "function"
+            ? instance.whenReady()
+            : instance
+        ).then(() => {
+          if (this.embeddedEditorInstance !== instance) return this;
 
-        if (initialContent !== undefined) {
-          this.embeddedEditorInstance.setContent(
-            initialContent ?? "",
-            this.options.language || "java"
-          );
-        }
+          if (this.pendingContent !== undefined) {
+            instance.setContent(
+              this.pendingContent ?? "",
+              this.pendingLanguage || this.options.language || "java"
+            );
 
-        if (this.pendingContent !== undefined) {
-          this.embeddedEditorInstance.setContent(
-            this.pendingContent ?? "",
-            this.pendingLanguage || this.options.language || "java"
-          );
+            this.pendingContent  = undefined;
+            this.pendingLanguage = undefined;
+          }
 
-          this.pendingContent  = undefined;
-          this.pendingLanguage = undefined;
-        }
+          this.readyState = true;
+          instance.refresh?.();
 
-        setTimeout(() => {
-          this.embeddedEditorInstance?.refresh?.();
-          this.embeddedEditorInstance?.focus?.();
-        }, 100);
+          setTimeout(() => {
+            if (this.embeddedEditorInstance !== instance) return;
+            instance.refresh?.();
+          }, 100);
+
+          return this;
+        });
       };
 
       if (document.readyState === "loading") {
@@ -583,6 +589,19 @@ window.smartCodeEditor = (() => {
     get ready() { return this.readyState; }
 
     whenReady() {
+      if (this.mode === 3) {
+        return new Promise(resolve => {
+          const check = () => {
+            if (this.readyPromise) {
+              this.readyPromise.then(() => resolve(this));
+              return;
+            }
+            setTimeout(check, 25);
+          };
+          check();
+        });
+      }
+
       return new Promise(resolve => {
         const check = () => this.readyState ? resolve(this) : setTimeout(check, 50);
         check();
