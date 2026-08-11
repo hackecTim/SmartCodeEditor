@@ -57,7 +57,7 @@ function isWatched(name) {
 }
 
 function lsyncSourceRoot() {
-  return projectFolder ? join(LSYNC_ROOT, projectFolder) : LSYNC_ROOT;
+  return LSYNC_ROOT;
 }
 
 async function syncLsyncToWorkspace() {
@@ -68,18 +68,28 @@ function watchLsyncRoot() {
   const root = lsyncSourceRoot();
   if (!existsSync(root)) return;
 
+  if (lsyncWatcher) {
+    lsyncWatcher.close();
+    lsyncWatcher = null;
+  }
+
+  const watchedProjectFolder = "";
+
   try {
-    watch(root, { recursive: true }, (event, filename) => {
+    lsyncWatcher = watch(root, { recursive: true }, (event, filename) => {
       if (!filename || !isWatched(filename)) return;
-      const rel = projectFolder
-        ? `${projectFolder}/${normalizePath(filename)}`
+      const rel = watchedProjectFolder
+        ? `${watchedProjectFolder}/${normalizePath(filename)}`
         : normalizePath(filename);
 
       setTimeout(() => {
         notifyJdtlsFileChanged(rel);
         if (rel.toLowerCase().endsWith(".jar") || rel.toLowerCase().endsWith(".java")) {
-          try { bootstrapJavaProject(); }
-          catch (e) { console.warn(`[java] classpath rebuild failed: ${e.message}`); }
+          for (const state of javaProjectStates.values()) {
+            if (!rel.startsWith(`${state.projectFolder}/`)) continue;
+            try { bootstrapJavaProjectState(state); }
+            catch (e) { console.warn(`[java] classpath rebuild failed: ${e.message}`); }
+          }
         }
       }, 200);
     });
@@ -89,18 +99,24 @@ function watchLsyncRoot() {
   }
 }
 
+let lsyncWatcher = null;
+
 function notifyJdtlsFileChanged(rel) {
-  if (!jdtls.isReady()) return;
-  const uri  = pathToFileURL(join(WORKSPACE, rel)).href;
-  const isJar = rel.toLowerCase().endsWith(".jar");
-  for (const client of javaClients) {
-    if (!client.initialized) continue;
-    client.sendNotification("workspace/didChangeWatchedFiles", {
-      changes: [{ uri, type: 2 }]
-    });
-    if (isJar) {
-      client.sendNotification("workspace/didChangeConfiguration", {
-        settings: { java: { project: { referencedLibraries: [join(WORKSPACE, "**", "*.jar")] } } }
+  const workspacePath = normalizePath(rel);
+  for (const connection of javaConnections) {
+    if (!workspacePath.startsWith(`${connection.state.projectFolder}/`)) continue;
+    notifyJavaConnectionFileChanged(connection, workspacePath);
+
+    if (workspacePath.toLowerCase().endsWith(".jar") && connection.process.isInitialized()) {
+      const jars = findJavaProjectJars(connection.state);
+      connection.process.sendNotification("workspace/didChangeConfiguration", {
+        settings: {
+          java: {
+            project: {
+              referencedLibraries: jars.map(path => javaProjectJarAbsolutePath(connection.state, path))
+            }
+          }
+        }
       });
     }
   }
@@ -148,6 +164,15 @@ function javaSourceRootForFile(relPath, content = null) {
 }
 
 const activeJavaSourceFolders = new Set();
+let activeJavaAlgorithmSourceFolder = "";
+
+function isJavaAlgorithmPath(relPath) {
+  const rel = normalizePath(relPath).toLowerCase();
+  const prefix = projectFolder
+    ? `${projectFolder}/algs/`.toLowerCase()
+    : "";
+  return !!prefix && rel.startsWith(prefix);
+}
 
 function addJavaSourceFolder(folder = "") {
   const rel = normalizeSyncRoot(folder);
@@ -156,7 +181,14 @@ function addJavaSourceFolder(folder = "") {
 
 function addJavaSourceFolderForFile(relPath, content = null) {
   const root = javaSourceRootForFile(relPath, content);
-  if (root) activeJavaSourceFolders.add(root);
+  if (!root) return root;
+
+  if (isJavaAlgorithmPath(relPath)) {
+    activeJavaAlgorithmSourceFolder = root;
+  } else {
+    activeJavaSourceFolders.add(root);
+  }
+
   return root;
 }
 
@@ -173,7 +205,13 @@ function autoDetectJavaSourceFolders() {
       const relPath = rel ? rel + "/" + name : name;
       let st;
       try { st = statSync(abs); } catch { continue; }
-      if (st.isDirectory()) walk(abs, relPath);
+      if (st.isDirectory()) {
+        const algorithmRoot = projectFolder
+          ? `${projectFolder}/algs`.toLowerCase()
+          : "";
+        if (algorithmRoot && relPath.toLowerCase() === algorithmRoot) continue;
+        walk(abs, relPath);
+      }
       else if (st.isFile() && name.toLowerCase().endsWith(".java")) {
         detected.add(javaSourceRootForFile(relPath));
       }
@@ -192,6 +230,7 @@ function getJavaSourceFolders() {
   const folders = new Set();
   for (const f of autoDetectJavaSourceFolders()) folders.add(f);
   for (const f of activeJavaSourceFolders) folders.add(f);
+  if (activeJavaAlgorithmSourceFolder) folders.add(activeJavaAlgorithmSourceFolder);
   if (projectFolder) folders.add(projectFolder);
 
   const all = [...folders].sort();
@@ -282,12 +321,24 @@ function jarAbsolutePath(jarPath) {
     : join(WORKSPACE, jarPath);
 }
 
-const JAVA_DATA_DIR = process.env.JDTLS_DATA_DIR || "/tmp/jdtls-data";
+const JAVA_DATA_ROOT = process.env.JDTLS_DATA_DIR || "/tmp/jdtls-data";
 const SETTINGS_DIR  = join(WORKSPACE, ".settings");
 const WORKSPACE_URI = pathToFileURL(WORKSPACE).href;
 
+function javaProjectScope() {
+  return (projectFolder || "all-projects").replace(/[^A-Za-z0-9._-]/g, "_");
+}
+
+function javaDataDirectory() {
+  return join(JAVA_DATA_ROOT, javaProjectScope());
+}
+
+function javaOutputFolder() {
+  return `bin/${javaProjectScope()}`;
+}
+
 mkdirSync(WORKSPACE, { recursive: true });
-mkdirSync(JAVA_DATA_DIR, { recursive: true });
+mkdirSync(JAVA_DATA_ROOT, { recursive: true });
 mkdirSync(SETTINGS_DIR, { recursive: true });
 
 function writeFileIfChanged(filePath, content) {
@@ -331,6 +382,7 @@ function bootstrapJavaProject() {
     .join("\n");
 
   const jars = findJarEntries();
+  const outputFolder = javaOutputFolder();
 
   const jarEntries = jars
     .map(rel =>
@@ -360,7 +412,7 @@ function bootstrapJavaProject() {
 ${sourceEntries}
 ${jarEntries}
   <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
-  <classpathentry kind="output" path="bin"/>
+  <classpathentry kind="output" path="${escapeXml(outputFolder)}"/>
 </classpath>
 `;
 
@@ -377,7 +429,7 @@ org.eclipse.jdt.core.compiler.source=17
   );
   writeFileIfChanged(prefsFile, prefsContent);
 
-  mkdirSync(join(WORKSPACE, "bin"), {
+  mkdirSync(join(WORKSPACE, outputFolder), {
     recursive: true
   });
 
@@ -404,30 +456,30 @@ org.eclipse.jdt.core.compiler.source=17
     );
   }
 
-  if (classpathChanged && jdtls.isReady()) {
+  if (classpathChanged && jdtls.isInitialized()) {
     notifyJdtlsFileChanged(".classpath");
-
-    for (const client of javaClients) {
-      if (!client.initialized) continue;
-
-      client.sendNotification(
-        "workspace/didChangeConfiguration",
-        {
-          settings: {
-            java: {
-              project: {
-                referencedLibraries: jars.map(jarAbsolutePath)
-              }
+    jdtls.sendNotification(
+      "java/projectConfigurationUpdate",
+      { uri: WORKSPACE_URI }
+    );
+    jdtls.sendNotification(
+      "workspace/didChangeConfiguration",
+      {
+        settings: {
+          java: {
+            project: {
+              referencedLibraries: jars.map(jarAbsolutePath)
             }
           }
         }
-      );
-    }
+      }
+    );
   }
 
   return {
     sourceFolders,
     jars,
+    outputFolder,
     classpathChanged
   };
 }
@@ -480,7 +532,9 @@ function findEmbeddedSourceFile(projectName, algorithmName) {
   if (!projectRoot || !existsSync(projectRoot)) return null;
 
   const algorithmLower = algorithm.toLowerCase();
-  const compactAlgorithm = algorithmLower.replace(/[^a-z0-9_]+/g, "");
+  const compactAlgorithm = algorithmLower
+    .replace(/^alg[\s_-]*/, "")
+    .replace(/[^a-z0-9]+/g, "");
   const skippedDirectories = new Set([".git", "node_modules", "bin", "build", "results"]);
   const candidates = [];
 
@@ -507,8 +561,14 @@ function findEmbeddedSourceFile(projectName, algorithmName) {
       const stem = basename(entry.name, extension).toLowerCase();
       const compactStem = stem.replace(/[^a-z0-9_]+/g, "");
       const segments = lowerPath.split("/");
+      const exactAlgorithmDirectory = segments.some(segment =>
+        segment
+          .replace(/^alg[\s_-]*/, "")
+          .replace(/[^a-z0-9]+/g, "") === compactAlgorithm
+      );
 
       let score = 0;
+      if (exactAlgorithmDirectory) score += 5000;
       if (stem === algorithmLower || compactStem === compactAlgorithm) score += 1000;
       if (segments.includes(algorithmLower)) score += 700;
       if (segments.some(segment => segment.replace(/[^a-z0-9_]+/g, "") === compactAlgorithm)) score += 650;
@@ -541,18 +601,35 @@ function createLspProcess(name, getArgs, clients) {
   let procReady   = false;
   let initialized = false;
   let initResult  = null;
+  let initializeRequestIds = new Set();
   let buf         = Buffer.alloc(0);
-  let initializeRequest = null;
-  let initializedNotification = {
-    jsonrpc: "2.0",
-    method: "initialized",
-    params: {}
-  };
-  let configurationNotification = null;
-  let restartState = null;
-  let restartId = null;
-  let restartSequence = 0;
-  const pendingMessages = [];
+  let restarting  = false;
+  let restartWaiters = [];
+  let initializationWaiters = [];
+  let stopped = false;
+
+  function resetInitialization() {
+    initialized = false;
+    initResult = null;
+    initializeRequestIds = new Set();
+  }
+
+  function finishInitialization() {
+    initialized = true;
+    for (const waiter of initializationWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve();
+    }
+    initializationWaiters = [];
+  }
+
+  function disconnectClients() {
+    for (const ws of [...clients]) {
+      if (ws.readyState === 0 || ws.readyState === 1) {
+        ws.close(1012, "LSP project context changed");
+      }
+    }
+  }
 
   function broadcast(msg) {
     const data = JSON.stringify(msg);
@@ -562,23 +639,14 @@ function createLspProcess(name, getArgs, clients) {
   }
 
   function sendRaw(obj) {
-    if (!proc || !procReady) return false;
+    if (!proc || !procReady) return;
     try {
       const json = JSON.stringify(obj);
       const body = Buffer.from(json, "utf8");
       const header = Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii");
       proc.stdin.write(Buffer.concat([header, body]));
-      return true;
     } catch (e) {
       if (e.code !== "EPIPE") console.error(`[${name}] send error:`, e.message);
-      return false;
-    }
-  }
-
-  function flushPendingMessages() {
-    while (pendingMessages.length) {
-      const item = pendingMessages.shift();
-      sendRaw(item.msg);
     }
   }
 
@@ -587,156 +655,78 @@ function createLspProcess(name, getArgs, clients) {
     const id     = msg.id;
 
     if (method === "initialize") {
-      initializeRequest = msg;
-
       if (initialized && initResult !== null) {
-        ws.send(JSON.stringify({
-          jsonrpc: "2.0",
-          id,
-          result: initResult
-        }));
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id, result: initResult }));
         console.log(`[${name}] replayed initialize to reconnected client`);
-      } else if (restartState) {
-        restartState.initializeClients.push({ ws, id });
       } else {
+        initializeRequestIds.add(id);
         sendRaw(msg);
       }
       return;
     }
 
     if (method === "initialized") {
-      initializedNotification = msg;
-      if (!initialized && !restartState) sendRaw(msg);
-      return;
-    }
-
-    if (method === "workspace/didChangeConfiguration") {
-      configurationNotification = msg;
-    }
-
-    if (!initialized && restartState) {
-      pendingMessages.push({ ws, msg });
+      if (!initialized && initResult !== null) {
+        sendRaw(msg);
+        finishInitialization();
+        console.log(`[${name}] initialized successfully`);
+      }
       return;
     }
 
     sendRaw(msg);
   }
 
-  function finishRestart(error, result = null) {
-    const state = restartState;
-    restartState = null;
-    restartId = null;
-
-    if (!state) return;
-
-    clearTimeout(state.timeout);
-
-    if (error) {
-      state.reject(error);
+  function start() {
+    if (stopped) return;
+    let spawnArgs;
+    try { spawnArgs = getArgs(); }
+    catch (e) {
+      console.error(`[${name}] cannot get args: ${e.message} — retrying in 5s`);
+      setTimeout(start, 5000);
       return;
     }
 
-    initialized = true;
-    initResult = result;
-
-    sendRaw(initializedNotification);
-
-    if (configurationNotification) {
-      sendRaw(configurationNotification);
-    }
-
-    for (const client of state.initializeClients) {
-      if (client.ws.readyState !== 1) continue;
-      client.ws.send(JSON.stringify({
-        jsonrpc: "2.0",
-        id: client.id,
-        result
-      }));
-    }
-
-    flushPendingMessages();
-    state.resolve();
-  }
-
-  function start() {
-    let spawnArgs;
-    try {
-      spawnArgs = getArgs();
-    } catch (e) {
-      console.error(`[${name}] cannot get args: ${e.message} — retrying in 5s`);
-      setTimeout(start, 5000);
-      return false;
-    }
-
     const { cmd, args, opts } = spawnArgs;
-    let child;
-
     try {
-      child = spawn(cmd, args, opts);
-      proc = child;
+      proc      = spawn(cmd, args, opts);
       procReady = true;
-      buf = Buffer.alloc(0);
+      buf       = Buffer.alloc(0);
     } catch (e) {
       console.error(`[${name}] spawn failed: ${e.message} — retrying in 5s`);
       setTimeout(start, 5000);
-      return false;
+      return;
     }
 
-    console.log(`[${name}] started (pid ${child.pid})`);
+    console.log(`[${name}] started (pid ${proc.pid})`);
 
-    child.stdout.on("data", chunk => {
-      if (proc !== child) return;
+    for (const resolve of restartWaiters) resolve();
+    restartWaiters = [];
 
+    proc.stdout.on("data", chunk => {
       buf = Buffer.concat([buf, chunk]);
-
       while (true) {
         const sep = buf.indexOf("\r\n\r\n");
         if (sep === -1) break;
-
         const headerStr = buf.slice(0, sep).toString("ascii");
         const match = headerStr.match(/Content-Length:\s*(\d+)/i);
-
-        if (!match) {
-          buf = buf.slice(sep + 4);
-          continue;
-        }
-
+        if (!match) { buf = buf.slice(sep + 4); continue; }
         const len = Number(match[1]);
         const bodyStart = sep + 4;
-        const bodyEnd = bodyStart + len;
-
+        const bodyEnd   = bodyStart + len;
         if (buf.length < bodyEnd) break;
-
         const bodyBuf = buf.slice(bodyStart, bodyEnd);
         buf = buf.slice(bodyEnd);
-
         try {
           const parsed = JSON.parse(bodyBuf.toString("utf8"));
-
-          if (restartState && parsed.id === restartId) {
-            if (parsed.error) {
-              finishRestart(
-                new Error(parsed.error.message || `${name} restart failed`)
-              );
-            } else {
-              console.log(`[${name}] reinitialized successfully`);
-              finishRestart(null, parsed.result);
-            }
-            continue;
-          }
-
           if (
             parsed.id !== undefined &&
-            !initialized &&
-            initializeRequest &&
-            parsed.id === initializeRequest.id &&
+            initializeRequestIds.has(parsed.id) &&
             parsed.result !== undefined
           ) {
-            initialized = true;
-            initResult = parsed.result;
-            console.log(`[${name}] initialized successfully`);
+            initializeRequestIds.delete(parsed.id);
+            initResult  = parsed.result;
           }
-
           broadcast(parsed);
         } catch (e) {
           console.error(`[${name}] bad JSON:`, e.message);
@@ -744,124 +734,82 @@ function createLspProcess(name, getArgs, clients) {
       }
     });
 
-    child.stderr.on("data", chunk => {
-      if (proc === child) {
-        process.stderr.write(`[${name}] ${chunk}`);
+    proc.stderr.on("data", c => process.stderr.write(`[${name}] ${c}`));
+
+    proc.on("exit", (code, signal) => {
+      procReady   = false;
+      resetInitialization();
+
+      if (stopped) {
+        console.log(`[${name}] stopped`);
+        return;
+      }
+
+      if (restarting) {
+        restarting = false;
+        console.log(`[${name}] exited (code=${code} signal=${signal}) — restarting for active project`);
+        start();
+      } else {
+        disconnectClients();
+        console.log(`[${name}] exited (code=${code} signal=${signal}) — restarting in 2s`);
+        setTimeout(start, 2000);
       }
     });
 
-    child.on("exit", (code, signal) => {
-      if (proc !== child) return;
-
-      proc = null;
-      procReady = false;
-      initialized = false;
-      initResult = null;
-
-      if (restartState) {
-        finishRestart(
-          new Error(`${name} exited during restart`)
-        );
-      }
-
-      console.log(
-        `[${name}] exited (code=${code} signal=${signal}) — restarting in 2s`
-      );
-
-      setTimeout(() => {
-        if (initializeRequest) {
-          restart().catch(error =>
-            console.error(`[${name}] restart failed:`, error.message)
-          );
-        } else {
-          start();
-        }
-      }, 2000);
+    proc.stdin.on("error", e => {
+      if (e.code !== "EPIPE") console.error(`[${name}] stdin:`, e.message);
     });
-
-    child.stdin.on("error", e => {
-      if (e.code !== "EPIPE") {
-        console.error(`[${name}] stdin:`, e.message);
-      }
-    });
-
-    if (restartState && initializeRequest) {
-      sendRaw({
-        ...initializeRequest,
-        id: restartId
-      });
-    }
-
-    return true;
-  }
-
-  function restart() {
-    if (restartState) return restartState.promise;
-
-    initialized = false;
-    initResult = null;
-    pendingMessages.length = 0;
-
-    let resolveRestart;
-    let rejectRestart;
-
-    const promise = new Promise((resolve, reject) => {
-      resolveRestart = resolve;
-      rejectRestart = reject;
-    });
-
-    restartId = initializeRequest
-      ? `smartcode-restart-${name}-${++restartSequence}`
-      : null;
-
-    restartState = {
-      promise,
-      resolve: resolveRestart,
-      reject: rejectRestart,
-      initializeClients: [],
-      timeout: null
-    };
-
-    const child = proc;
-    proc = null;
-    procReady = false;
-    buf = Buffer.alloc(0);
-
-    if (child) {
-      try {
-        child.kill("SIGTERM");
-      } catch {}
-    }
-
-    const started = start();
-
-    if (!started) {
-      finishRestart(new Error(`${name} could not be started`));
-      return promise;
-    }
-
-    if (!initializeRequest) {
-      const state = restartState;
-      restartState = null;
-      restartId = null;
-      state.resolve();
-      return promise;
-    }
-
-    restartState.timeout = setTimeout(() => {
-      finishRestart(new Error(`${name} reinitialization timed out`));
-    }, 30000);
-
-    return promise;
   }
 
   return {
     handleClientMessage,
-    sendNotification: (method, params) =>
-      sendRaw({ jsonrpc: "2.0", method, params }),
+    sendNotification: (method, params) => sendRaw({ jsonrpc: "2.0", method, params }),
     start,
-    restart,
-    isReady: () => procReady && initialized
+    stop: () => {
+      stopped = true;
+      procReady = false;
+      resetInitialization();
+      for (const waiter of initializationWaiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error(`${name} stopped`));
+      }
+      initializationWaiters = [];
+      if (proc && proc.exitCode === null && !proc.killed) proc.kill();
+    },
+    restart: () => new Promise(resolve => {
+      restartWaiters.push(resolve);
+      procReady = false;
+      resetInitialization();
+
+      if (proc && proc.exitCode === null && !proc.killed) {
+        restarting = true;
+        if (!proc.kill()) {
+          restarting = false;
+          start();
+        }
+      } else {
+        start();
+      }
+    }),
+    disconnectClients,
+    waitUntilInitialized: (timeoutMs = 30000) => {
+      if (initialized) return Promise.resolve();
+
+      return new Promise((resolve, reject) => {
+        const waiter = {
+          resolve,
+          reject,
+          timer: setTimeout(() => {
+            initializationWaiters = initializationWaiters.filter(item => item !== waiter);
+            reject(new Error(`${name} initialization timeout`));
+          }, timeoutMs)
+        };
+
+        initializationWaiters.push(waiter);
+      });
+    },
+    isReady: () => procReady,
+    isInitialized: () => initialized
   };
 }
 
@@ -885,103 +833,282 @@ const clangd = createLspProcess("clangd", () => {
 }, clangdClients);
 
 // jdtls
-const javaClients = new Set();
-const javaOpenDocuments = new Map();
+const javaProjectStates = new Map();
+const javaConnections = new Set();
+let javaConnectionId = 0;
 
-function trackJavaDocument(ws, uri) {
-  if (!uri) return;
+function javaProjectState(folder) {
+  const normalized = normalizeSyncRoot(folder);
+  if (!normalized) return null;
+  if (javaProjectStates.has(normalized)) return javaProjectStates.get(normalized);
 
-  if (!ws.openDocuments) {
-    ws.openDocuments = new Set();
-  }
+  const root = safeJoin(WORKSPACE, normalized);
+  if (!root || !existsSync(root)) return null;
 
-  if (ws.openDocuments.has(uri)) return;
-
-  ws.openDocuments.add(uri);
-
-  if (!javaOpenDocuments.has(uri)) {
-    javaOpenDocuments.set(uri, new Set());
-  }
-
-  javaOpenDocuments.get(uri).add(ws);
+  const state = {
+    projectFolder: normalized,
+    root,
+    uri: pathToFileURL(root).href,
+    activeSourceFolders: new Set(),
+    activeAlgorithmSourceFolder: "",
+    connections: new Set()
+  };
+  javaProjectStates.set(normalized, state);
+  return state;
 }
 
-function untrackJavaDocument(ws, uri, closeDocument = false) {
-  if (!uri || !ws.openDocuments?.has(uri)) return;
+function javaProjectRelativePath(state, workspacePath) {
+  const rel = normalizePath(workspacePath);
+  const prefix = `${state.projectFolder}/`;
+  return rel.startsWith(prefix) ? rel.slice(prefix.length) : "";
+}
 
-  ws.openDocuments.delete(uri);
+function javaProjectSourceRoot(state, workspacePath, content = null) {
+  const rel = javaProjectRelativePath(state, workspacePath);
+  if (!rel.toLowerCase().endsWith(".java")) return "";
 
-  const owners = javaOpenDocuments.get(uri);
-  if (!owners) return;
-
-  owners.delete(ws);
-
-  if (owners.size === 0) {
-    javaOpenDocuments.delete(uri);
-
-    if (closeDocument) {
-      jdtls.sendNotification("textDocument/didClose", {
-        textDocument: { uri }
-      });
+  const dir = parentDir(rel);
+  let text = content;
+  if (text === null || text === undefined) {
+    try {
+      const file = safeJoin(state.root, rel);
+      text = file && existsSync(file) ? readFileSync(file, "utf8") : "";
+    } catch {
+      text = "";
     }
   }
+
+  const pkg = detectPackageName(text || "");
+  if (!pkg) return dir;
+  const pkgPath = pkg.replace(/\./g, "/");
+  if (dir === pkgPath) return "";
+  if (dir.endsWith("/" + pkgPath)) return dir.slice(0, dir.length - pkgPath.length - 1);
+  return dir;
 }
 
-function closeJavaClientDocuments(ws) {
-  for (const uri of [...(ws.openDocuments || [])]) {
-    untrackJavaDocument(ws, uri, true);
-  }
+function addJavaProjectSourceFile(state, workspacePath, content = null) {
+  const root = javaProjectSourceRoot(state, workspacePath, content);
+  if (!root) return root;
+
+  const rel = javaProjectRelativePath(state, workspacePath).toLowerCase();
+  if (rel.startsWith("algs/")) state.activeAlgorithmSourceFolder = root;
+  else state.activeSourceFolders.add(root);
+  return root;
 }
 
-function closeAllJavaDocuments() {
-  for (const uri of javaOpenDocuments.keys()) {
-    jdtls.sendNotification("textDocument/didClose", {
-      textDocument: { uri }
-    });
+function detectJavaProjectSourceFolders(state) {
+  const folders = new Set();
+  const skip = new Set([
+    ".git", ".metadata", ".settings", ".smartcode-bin", "bin", "build", "node_modules", "results"
+  ]);
+
+  function walk(dir, rel = "") {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch { return; }
+
+    for (const entry of entries) {
+      if (skip.has(entry.name.toLowerCase())) continue;
+      const entryRel = rel ? `${rel}/${entry.name}` : entry.name;
+      const entryAbs = join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        if (entryRel.toLowerCase() === "algs") continue;
+        walk(entryAbs, entryRel);
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".java")) {
+        const workspacePath = `${state.projectFolder}/${entryRel}`;
+        const root = javaProjectSourceRoot(state, workspacePath);
+        if (root) folders.add(root);
+      }
+    }
   }
 
-  javaOpenDocuments.clear();
-
-  for (const ws of javaClients) {
-    ws.openDocuments?.clear();
-  }
+  walk(state.root);
+  return folders;
 }
 
-const jdtls = createLspProcess("jdtls", () => {
-  const pluginsDir = "/opt/jdtls/plugins";
-  const javaProjectData = (
-    projectFolder || "workspace"
-  ).replace(/[^A-Za-z0-9._-]/g, "_");
-  const javaDataDir = join(
-    JAVA_DATA_DIR,
-    javaProjectData
+function javaProjectSourceFolders(state) {
+  const folders = detectJavaProjectSourceFolders(state);
+  for (const folder of state.activeSourceFolders) folders.add(folder);
+  if (state.activeAlgorithmSourceFolder) folders.add(state.activeAlgorithmSourceFolder);
+
+  const all = [...folders].sort();
+  if (!all.length) return [""];
+  return all.filter(folder =>
+    folder === "" || !all.some(other => other !== folder && other !== "" && other.startsWith(folder + "/"))
   );
-  mkdirSync(javaDataDir, { recursive: true });
-  if (!existsSync(pluginsDir)) throw new Error("jdtls not installed at /opt/jdtls");
-  const launcher = readdirSync(pluginsDir)
-    .find(f => f.startsWith("org.eclipse.equinox.launcher_") && f.endsWith(".jar"));
-  if (!launcher) throw new Error("jdtls launcher jar not found in " + pluginsDir);
-  console.log("[jdtls] launcher:", launcher);
-  return {
-    cmd: "java",
-    args: [
-      "-Declipse.application=org.eclipse.jdt.ls.core.id1",
-      "-Dosgi.bundles.defaultStartLevel=4",
-      "-Declipse.product=org.eclipse.jdt.ls.core.product",
-      "-Dlog.level=ERROR",
-      "-Dfile.encoding=UTF-8",
-      "-Xms256m", "-Xmx1G", "-XX:+UseG1GC",
-      "--add-modules=ALL-SYSTEM",
-      "--add-opens", "java.base/java.util=ALL-UNNAMED",
-      "--add-opens", "java.base/java.lang=ALL-UNNAMED",
-      "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
-      "-jar", join(pluginsDir, launcher),
-      "-configuration", "/opt/jdtls/config_linux",
-      "-data", javaDataDir
-    ],
-    opts: { cwd: WORKSPACE }
+}
+
+function findJavaProjectJars(state) {
+  const jars = new Set();
+
+  function walk(dir, valueForFile) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); }
+    catch { return; }
+
+    for (const entry of entries) {
+      const file = join(dir, entry.name);
+      if (entry.isDirectory()) walk(file, valueForFile);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".jar")) {
+        jars.add(valueForFile(file));
+      }
+    }
+  }
+
+  if (existsSync(ALGATOR_RUNTIME_ROOT)) walk(ALGATOR_RUNTIME_ROOT, file => file);
+  walk(state.root, file => relative(state.root, file).replace(/\\/g, "/"));
+  return [...jars].sort();
+}
+
+function javaProjectJarAbsolutePath(state, jarPath) {
+  return jarPath.startsWith("/") ? jarPath : join(state.root, jarPath);
+}
+
+function notifyJavaConnectionFileChanged(connection, workspacePath) {
+  if (!connection.process.isInitialized()) return;
+  const rel = javaProjectRelativePath(connection.state, workspacePath);
+  if (!rel && workspacePath !== ".classpath") return;
+  const file = workspacePath === ".classpath"
+    ? join(connection.state.root, ".classpath")
+    : join(connection.state.root, rel);
+  connection.process.sendNotification("workspace/didChangeWatchedFiles", {
+    changes: [{ uri: pathToFileURL(file).href, type: 2 }]
+  });
+}
+
+function bootstrapJavaProjectState(state) {
+  const sourceFolders = javaProjectSourceFolders(state);
+  const jars = findJavaProjectJars(state);
+  const settingsDir = join(state.root, ".settings");
+  const outputFolder = "bin/smartcode";
+
+  mkdirSync(settingsDir, { recursive: true });
+  mkdirSync(join(state.root, outputFolder), { recursive: true });
+
+  const sourceEntries = sourceFolders
+    .map(folder => classpathEntryForSourceFolder(folder, sourceFolders))
+    .join("\n");
+  const jarEntries = jars
+    .map(path => `  <classpathentry kind="lib" path="${escapeXml(path)}"/>`)
+    .join("\n");
+  const projectName = `smartcode-${state.projectFolder.replace(/[^A-Za-z0-9._-]/g, "_")}`;
+
+  const projectContent = `<?xml version="1.0" encoding="UTF-8"?>
+<projectDescription>
+  <name>${escapeXml(projectName)}</name>
+  <comment></comment>
+  <projects></projects>
+  <buildSpec>
+    <buildCommand>
+      <name>org.eclipse.jdt.core.javabuilder</name>
+      <arguments></arguments>
+    </buildCommand>
+  </buildSpec>
+  <natures>
+    <nature>org.eclipse.jdt.core.javanature</nature>
+  </natures>
+</projectDescription>
+`;
+  const classpathContent = `<?xml version="1.0" encoding="UTF-8"?>
+<classpath>
+${sourceEntries}
+${jarEntries}
+  <classpathentry kind="con" path="org.eclipse.jdt.launching.JRE_CONTAINER"/>
+  <classpathentry kind="output" path="${outputFolder}"/>
+</classpath>
+`;
+  const prefsContent = `eclipse.preferences.version=1
+org.eclipse.jdt.core.compiler.codegen.targetPlatform=17
+org.eclipse.jdt.core.compiler.compliance=17
+org.eclipse.jdt.core.compiler.source=17
+`;
+
+  writeFileIfChanged(join(state.root, ".project"), projectContent);
+  const classpathChanged = writeFileIfChanged(join(state.root, ".classpath"), classpathContent);
+  writeFileIfChanged(join(settingsDir, "org.eclipse.jdt.core.prefs"), prefsContent);
+
+  if (classpathChanged) {
+    for (const connection of state.connections) {
+      notifyJavaConnectionFileChanged(connection, ".classpath");
+      if (connection.process.isInitialized()) {
+        connection.process.sendNotification("java/projectConfigurationUpdate", { uri: state.uri });
+        connection.process.sendNotification("workspace/didChangeConfiguration", {
+          settings: {
+            java: {
+              project: {
+                referencedLibraries: jars.map(path => javaProjectJarAbsolutePath(state, path))
+              }
+            }
+          }
+        });
+      }
+    }
+  }
+
+  return { sourceFolders, jars, outputFolder, classpathChanged };
+}
+
+function createJavaConnection(state, ws) {
+  const clients = new Set([ws]);
+  const id = ++javaConnectionId;
+  const scope = state.projectFolder.replace(/[^A-Za-z0-9._-]/g, "_");
+  const dataDirectory = join(JAVA_DATA_ROOT, scope, `connection-${id}`);
+  const pluginsDir = "/opt/jdtls/plugins";
+
+  const connection = {
+    id,
+    state,
+    ws,
+    clients,
+    openDocuments: new Set(),
+    process: null
   };
-}, javaClients);
+
+  connection.process = createLspProcess(`jdtls:${state.projectFolder}:${id}`, () => {
+    mkdirSync(dataDirectory, { recursive: true });
+    if (!existsSync(pluginsDir)) throw new Error("jdtls not installed at /opt/jdtls");
+    const launcher = readdirSync(pluginsDir)
+      .find(file => file.startsWith("org.eclipse.equinox.launcher_") && file.endsWith(".jar"));
+    if (!launcher) throw new Error("jdtls launcher jar not found in " + pluginsDir);
+
+    return {
+      cmd: "java",
+      args: [
+        "-Declipse.application=org.eclipse.jdt.ls.core.id1",
+        "-Dosgi.bundles.defaultStartLevel=4",
+        "-Declipse.product=org.eclipse.jdt.ls.core.product",
+        "-Djava.lsp.joinOnCompletion=true",
+        "-Dlog.level=ERROR",
+        "-Dfile.encoding=UTF-8",
+        "-Xms256m", "-Xmx1G", "-XX:+UseG1GC",
+        "--add-modules=ALL-SYSTEM",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED",
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+        "-jar", join(pluginsDir, launcher),
+        "-configuration", "/opt/jdtls/config_linux",
+        "-data", dataDirectory
+      ],
+      opts: { cwd: state.root }
+    };
+  }, clients);
+
+  state.connections.add(connection);
+  javaConnections.add(connection);
+  return connection;
+}
+
+function javaWorkspacePathFromUri(state, uri) {
+  const rootUri = pathToFileURL(state.root + "/").href;
+  const value = String(uri || "");
+  if (!value.startsWith(rootUri)) return "";
+  return `${state.projectFolder}/${normalizePath(decodeURIComponent(value.slice(rootUri.length)))}`;
+}
+
+function javaMessageDocumentUri(message) {
+  return message?.params?.textDocument?.uri || message?.params?.uri || "";
+}
 
 //HTTP strežnik
 
@@ -997,24 +1124,24 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.projectFolder || data.folder || "");
-      if (newFolder !== projectFolder) {
-        closeAllJavaDocuments();
-        activeJavaSourceFolders.clear();
+      const state = javaProjectState(newFolder);
+      if (!state) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Invalid project folder" }));
+        return;
       }
-      const projectChanged = newFolder !== projectFolder;
-
       projectFolder = newFolder;
       console.log(`[server] projectFolder nastavljen na: ${projectFolder || "/"}`);
       await syncLsyncToWorkspace();
-      bootstrapJavaProject();
+      bootstrapJavaProjectState(state);
       watchLsyncRoot();
-
-      if (projectChanged) {
-        await jdtls.restart();
-      }
-
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, projectFolder, workspace: WORKSPACE }));
+      res.end(JSON.stringify({
+        ok: true,
+        projectFolder: state.projectFolder,
+        workspace: state.root,
+        workspaceUri: state.uri
+      }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -1027,29 +1154,19 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.syncRoot || data.folder || "");
-      const projectChanged = Boolean(
-        newFolder && newFolder !== projectFolder
-      );
-
       if (newFolder) {
-        if (projectChanged) {
-          closeAllJavaDocuments();
-          activeJavaSourceFolders.clear();
-        }
         projectFolder = newFolder;
-        if (data.folder) addJavaSourceFolder(data.folder);
       }
-
       await syncLsyncToWorkspace();
-      bootstrapJavaProject();
-      watchLsyncRoot();
-
-      if (projectChanged) {
-        await jdtls.restart();
-      }
-
+      const state = javaProjectState(projectFolder);
+      if (state) bootstrapJavaProjectState(state);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, projectFolder, workspace: WORKSPACE }));
+      res.end(JSON.stringify({
+        ok: true,
+        projectFolder,
+        workspace: state?.root || WORKSPACE,
+        workspaceUri: state?.uri || WORKSPACE_URI
+      }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -1059,9 +1176,49 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "POST" && req.url === "/rebuild-java-classpath") {
     try {
-      bootstrapJavaProject();
+      const state = javaProjectState(projectFolder);
+      if (!state) throw new Error("Java project is not selected");
+      const result = bootstrapJavaProjectState(state);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, javaSourceFolders: getJavaSourceFolders() }));
+      res.end(JSON.stringify({ ok: true, javaSourceFolders: result.sourceFolders }));
+    } catch (e) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  if (req.method === "POST" && req.url === "/java-context") {
+    try {
+      const body = await readRequestBody(req);
+      const data = JSON.parse(body || "{}");
+      const requestedProject = normalizeSyncRoot(data.projectFolder || "");
+      const file = normalizePath(data.file || data.filename || "");
+      const projectState = javaProjectState(requestedProject);
+
+      if (
+        !projectState ||
+        !file.startsWith(requestedProject + "/") ||
+        !file.toLowerCase().endsWith(".java")
+      ) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Invalid Java context" }));
+        return;
+      }
+
+      const fp = safeJoin(WORKSPACE, file);
+      const content = fp && existsSync(fp) ? readFileSync(fp, "utf8") : null;
+      addJavaProjectSourceFile(projectState, file, content);
+      const state = bootstrapJavaProjectState(projectState);
+
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        ok: true,
+        projectFolder: requestedProject,
+        file,
+        javaSourceFolders: state.sourceFolders,
+        classpathChanged: state.classpathChanged
+      }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -1074,10 +1231,12 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const folder = normalizeSyncRoot(data.folder || "");
-      if (folder) addJavaSourceFolder(folder);
-      bootstrapJavaProject();
+      const state = javaProjectState(projectFolder);
+      if (!state) throw new Error("Java project is not selected");
+      if (folder) state.activeSourceFolders.add(folder);
+      const result = bootstrapJavaProjectState(state);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ ok: true, javaSourceFolders: getJavaSourceFolders() }));
+      res.end(JSON.stringify({ ok: true, javaSourceFolders: result.sourceFolders }));
     } catch (e) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: false, error: e.message }));
@@ -1139,8 +1298,11 @@ const server = http.createServer(async (req, res) => {
       console.log(`[server] saved algator_lsync_root: ${relPath}`);
 
       if (relPath.toLowerCase().endsWith(".java")) {
-        addJavaSourceFolderForFile(relPath, body);
-        bootstrapJavaProject();
+        const state = javaProjectState(relPath.split("/")[0]);
+        if (state) {
+          addJavaProjectSourceFile(state, relPath, body);
+          bootstrapJavaProjectState(state);
+        }
       }
 
 
@@ -1167,8 +1329,11 @@ const server = http.createServer(async (req, res) => {
       writeFileSync(fp, updated, "utf8");
       console.log(`[server] patched algator_lsync_root: ${relPath}`);
       if (relPath.toLowerCase().endsWith(".java")) {
-        addJavaSourceFolderForFile(relPath, updated);
-        bootstrapJavaProject();
+        const state = javaProjectState(relPath.split("/")[0]);
+        if (state) {
+          addJavaProjectSourceFile(state, relPath, updated);
+          bootstrapJavaProjectState(state);
+        }
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
@@ -1189,14 +1354,16 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === "GET" && req.url === "/java-classpath") {
     try {
-      const state = bootstrapJavaProject();
+      const projectState = javaProjectState(projectFolder);
+      if (!projectState) throw new Error("Java project is not selected");
+      const state = bootstrapJavaProjectState(projectState);
 
       res.writeHead(200, {
         "Content-Type": "application/json"
       });
 
       res.end(JSON.stringify({
-        projectFolder,
+        projectFolder: projectState.projectFolder,
         sourceFolders: state.sourceFolders,
         jars: state.jars
       }));
@@ -1222,11 +1389,11 @@ const server = http.createServer(async (req, res) => {
       lsyncRoot:    LSYNC_ROOT,
       projectFolder,
       workspaceUri: WORKSPACE_URI,
-      jdtlsDataDir: JAVA_DATA_DIR,
+      jdtlsDataDir: JAVA_DATA_ROOT,
       clangd:       clangd.isReady(),
-      jdtls:        jdtls.isReady(),
+      jdtls:        [...javaConnections].some(connection => connection.process.isReady()),
       clangdClients: clangdClients.size,
-      javaClients:   javaClients.size,
+      javaClients:   javaConnections.size,
       files:         scanWorkspaceFiles()
     }));
     return;
@@ -1296,8 +1463,16 @@ const wssClangd = new WebSocketServer({ noServer: true });
 const wssJava   = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
-  if (req.url === "/java") {
-    wssJava.handleUpgrade(req, socket, head, ws => wssJava.emit("connection", ws));
+  const requestUrl = new URL(req.url || "/", "http://localhost");
+  if (requestUrl.pathname === "/java") {
+    const requestedProject = normalizeSyncRoot(requestUrl.searchParams.get("projectFolder") || "");
+    const state = javaProjectState(requestedProject);
+    if (!state) {
+      socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wssJava.handleUpgrade(req, socket, head, ws => wssJava.emit("connection", ws, state));
   } else {
     wssClangd.handleUpgrade(req, socket, head, ws => wssClangd.emit("connection", ws));
   }
@@ -1319,20 +1494,6 @@ function setupWss(wss, lspProc, clientSet, name) {
           ws.initialized = true;
         }
 
-        if (name === "jdtls") {
-          if (msg.method === "textDocument/didOpen") {
-            trackJavaDocument(
-              ws,
-              msg.params?.textDocument?.uri
-            );
-          } else if (msg.method === "textDocument/didClose") {
-            untrackJavaDocument(
-              ws,
-              msg.params?.textDocument?.uri
-            );
-          }
-        }
-
         lspProc.handleClientMessage(ws, msg);
       } catch (e) {
         console.error(`[${name}] bad WS message:`, e.message);
@@ -1342,10 +1503,6 @@ function setupWss(wss, lspProc, clientSet, name) {
     const cleanup = () => {
       if (ws.cleanedUp) return;
       ws.cleanedUp = true;
-
-      if (name === "jdtls") {
-        closeJavaClientDocuments(ws);
-      }
 
       clientSet.delete(ws);
     };
@@ -1362,26 +1519,124 @@ function setupWss(wss, lspProc, clientSet, name) {
   });
 }
 
+function setupJavaWss() {
+  wssJava.on("connection", (ws, state) => {
+    const connection = createJavaConnection(state, ws);
+    ws.cleanedUp = false;
+    bootstrapJavaProjectState(state);
+    console.log(`[jdtls:${state.projectFolder}] browser connected`);
+
+    ws.on("message", raw => {
+      try {
+        const message = JSON.parse(raw.toString());
+
+        if (message.method === "initialize") {
+          message.params = {
+            ...(message.params || {}),
+            rootUri: state.uri,
+            workspaceFolders: [{ uri: state.uri, name: state.projectFolder }]
+          };
+        }
+
+        const documentUri = javaMessageDocumentUri(message);
+        const workspacePath = documentUri
+          ? javaWorkspacePathFromUri(state, documentUri)
+          : "";
+
+        if (documentUri && !workspacePath) {
+          if (message.id !== undefined) {
+            ws.send(JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              error: { code: -32602, message: "Document is outside the selected project" }
+            }));
+          }
+          return;
+        }
+
+        if (message.method === "textDocument/didOpen") {
+          const textDocument = message.params?.textDocument;
+          connection.openDocuments.add(textDocument?.uri);
+          const projectRelative = javaProjectRelativePath(state, workspacePath).toLowerCase();
+          if (projectRelative.startsWith("algs/")) {
+            const previousRoot = state.activeAlgorithmSourceFolder;
+            addJavaProjectSourceFile(state, workspacePath, textDocument?.text || "");
+            if (previousRoot !== state.activeAlgorithmSourceFolder) {
+              bootstrapJavaProjectState(state);
+            }
+          }
+        } else if (message.method === "textDocument/didClose") {
+          connection.openDocuments.delete(message.params?.textDocument?.uri);
+        }
+
+        connection.process.handleClientMessage(ws, message);
+
+        if (message.method === "initialized") {
+          const result = bootstrapJavaProjectState(state);
+          connection.process.sendNotification("workspace/didChangeConfiguration", {
+            settings: {
+              java: {
+                project: {
+                  referencedLibraries: result.jars.map(path => javaProjectJarAbsolutePath(state, path))
+                }
+              }
+            }
+          });
+        }
+      } catch (error) {
+        console.error(`[jdtls:${state.projectFolder}] bad WS message:`, error.message);
+      }
+    });
+
+    const cleanup = () => {
+      if (ws.cleanedUp) return;
+      ws.cleanedUp = true;
+
+      if (connection.process.isInitialized()) {
+        for (const uri of connection.openDocuments) {
+          connection.process.sendNotification("textDocument/didClose", {
+            textDocument: { uri }
+          });
+        }
+      }
+
+      connection.openDocuments.clear();
+      connection.clients.delete(ws);
+      connection.process.stop();
+      state.connections.delete(connection);
+      javaConnections.delete(connection);
+    };
+
+    ws.on("close", () => {
+      cleanup();
+      console.log(`[jdtls:${state.projectFolder}] disconnected`);
+    });
+    ws.on("error", error => {
+      cleanup();
+      console.error(`[jdtls:${state.projectFolder}] WS error:`, error.message);
+    });
+
+    connection.process.start();
+  });
+}
+
 const JAVA_CLASSPATH_REFRESH_MS = Number(process.env.JAVA_CLASSPATH_REFRESH_MS || 2000);
 if (JAVA_CLASSPATH_REFRESH_MS > 0) {
   setInterval(() => {
-    try { bootstrapJavaProject(); }
-    catch (e) { console.warn(`[java] classpath refresh failed: ${e.message}`); }
+    for (const state of javaProjectStates.values()) {
+      try { bootstrapJavaProjectState(state); }
+      catch (e) { console.warn(`[java] classpath refresh failed: ${e.message}`); }
+    }
   }, JAVA_CLASSPATH_REFRESH_MS);
 }
 
 setupWss(wssClangd, clangd, clangdClients, "clangd");
-setupWss(wssJava,   jdtls,  javaClients,   "jdtls");
+setupJavaWss();
 
-/*
- * .project in .classpath morata obstajati že pred zagonom JDTLS.
- * Tako JDTLS ob prvem uvozu projekta takoj vidi ALGator.jar,
- * projektne JAR-e in vse Java source mape.
- */
-bootstrapJavaProject();
+const initialJavaProject = javaProjectState(projectFolder);
+if (initialJavaProject) bootstrapJavaProjectState(initialJavaProject);
 
 clangd.start();
-jdtls.start();
 
 watchLsyncRoot();
 
