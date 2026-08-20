@@ -602,6 +602,7 @@ function createLspProcess(name, getArgs, clients) {
   let initialized = false;
   let initResult  = null;
   let initializeRequestIds = new Set();
+  let initializeClients = new Map();
   let buf         = Buffer.alloc(0);
   let restarting  = false;
   let restartWaiters = [];
@@ -612,6 +613,7 @@ function createLspProcess(name, getArgs, clients) {
     initialized = false;
     initResult = null;
     initializeRequestIds = new Set();
+    initializeClients = new Map();
   }
 
   function finishInitialization() {
@@ -655,12 +657,15 @@ function createLspProcess(name, getArgs, clients) {
     const id     = msg.id;
 
     if (method === "initialize") {
-      if (initialized && initResult !== null) {
+      if (initResult !== null) {
         ws.send(JSON.stringify({ jsonrpc: "2.0", id, result: initResult }));
         console.log(`[${name}] replayed initialize to reconnected client`);
       } else {
-        initializeRequestIds.add(id);
-        sendRaw(msg);
+        initializeClients.set(ws, id);
+        if (!initializeRequestIds.size) {
+          initializeRequestIds.add(id);
+          sendRaw(msg);
+        }
       }
       return;
     }
@@ -722,10 +727,19 @@ function createLspProcess(name, getArgs, clients) {
           if (
             parsed.id !== undefined &&
             initializeRequestIds.has(parsed.id) &&
-            parsed.result !== undefined
+            (parsed.result !== undefined || parsed.error !== undefined)
           ) {
-            initializeRequestIds.delete(parsed.id);
-            initResult  = parsed.result;
+            initializeRequestIds.clear();
+            if (parsed.result !== undefined) initResult = parsed.result;
+
+            for (const [client, requestId] of initializeClients) {
+              if (client.readyState !== 1) continue;
+              client.send(JSON.stringify(parsed.error !== undefined
+                ? { jsonrpc: "2.0", id: requestId, error: parsed.error }
+                : { jsonrpc: "2.0", id: requestId, result: parsed.result }));
+            }
+            initializeClients.clear();
+            continue;
           }
           broadcast(parsed);
         } catch (e) {
@@ -851,9 +865,22 @@ function javaProjectState(folder) {
     uri: pathToFileURL(root).href,
     activeSourceFolders: new Set(),
     activeAlgorithmSourceFolder: "",
-    connections: new Set()
+    connections: new Set(),
+    sharedConnection: null
   };
   javaProjectStates.set(normalized, state);
+  return state;
+}
+
+async function waitForJavaProjectState(folder, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs;
+  let state = javaProjectState(folder);
+
+  while (!state && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    state = javaProjectState(folder);
+  }
+
   return state;
 }
 
@@ -966,9 +993,14 @@ function javaProjectJarAbsolutePath(state, jarPath) {
 }
 
 function notifyJavaConnectionFileChanged(connection, workspacePath) {
-  if (!connection.process.isInitialized()) return;
   const rel = javaProjectRelativePath(connection.state, workspacePath);
   if (!rel && workspacePath !== ".classpath") return;
+
+  if (!connection.process.isInitialized()) {
+    connection.pendingFileChanges.add(workspacePath);
+    return;
+  }
+
   const file = workspacePath === ".classpath"
     ? join(connection.state.root, ".classpath")
     : join(connection.state.root, rel);
@@ -977,11 +1009,26 @@ function notifyJavaConnectionFileChanged(connection, workspacePath) {
   });
 }
 
+function flushJavaConnectionFileChanges(connection) {
+  if (!connection.process.isInitialized() || !connection.pendingFileChanges.size) return;
+
+  const pending = [...connection.pendingFileChanges];
+  connection.pendingFileChanges.clear();
+
+  for (const workspacePath of pending) {
+    notifyJavaConnectionFileChanged(connection, workspacePath);
+  }
+}
+
 function bootstrapJavaProjectState(state) {
   const sourceFolders = javaProjectSourceFolders(state);
   const jars = findJavaProjectJars(state);
   const settingsDir = join(state.root, ".settings");
   const outputFolder = "bin/smartcode";
+
+  for (const folder of sourceFolders) {
+    if (folder) mkdirSync(join(state.root, folder), { recursive: true });
+  }
 
   mkdirSync(settingsDir, { recursive: true });
   mkdirSync(join(state.root, outputFolder), { recursive: true });
@@ -1050,18 +1097,32 @@ org.eclipse.jdt.core.compiler.source=17
 }
 
 function createJavaConnection(state, ws) {
+  if (state.sharedConnection) {
+    const connection = state.sharedConnection;
+    clearTimeout(connection.idleStopTimer);
+    connection.idleStopTimer = null;
+    connection.clients.add(ws);
+    return connection;
+  }
+
   const clients = new Set([ws]);
   const id = ++javaConnectionId;
   const scope = state.projectFolder.replace(/[^A-Za-z0-9._-]/g, "_");
-  const dataDirectory = join(JAVA_DATA_ROOT, scope, `connection-${id}`);
+  const dataDirectory = join(JAVA_DATA_ROOT, scope, "shared");
   const pluginsDir = "/opt/jdtls/plugins";
 
   const connection = {
     id,
     state,
-    ws,
     clients,
     openDocuments: new Set(),
+    documentOwners: new Map(),
+    documentSnapshots: new Map(),
+    documentVersions: new Map(),
+    pendingDocumentCloseTimers: new Map(),
+    pendingFileChanges: new Set(),
+    idleStopTimer: null,
+    started: false,
     process: null
   };
 
@@ -1094,9 +1155,77 @@ function createJavaConnection(state, ws) {
     };
   }, clients);
 
+  state.sharedConnection = connection;
   state.connections.add(connection);
   javaConnections.add(connection);
   return connection;
+}
+
+function javaDocumentDiskContent(connection, uri) {
+  const workspacePath = javaWorkspacePathFromUri(connection.state, uri);
+  if (!workspacePath) return null;
+  const rel = javaProjectRelativePath(connection.state, workspacePath);
+  const file = rel ? join(connection.state.root, rel) : null;
+  if (!file || !existsSync(file)) return null;
+  try { return readFileSync(file, "utf8"); }
+  catch { return null; }
+}
+
+function cancelPendingJavaDocumentClose(connection, uri) {
+  const timer = connection.pendingDocumentCloseTimers.get(uri);
+  if (timer) clearTimeout(timer);
+  connection.pendingDocumentCloseTimers.delete(uri);
+}
+
+function closeJavaDocumentNow(connection, uri) {
+  cancelPendingJavaDocumentClose(connection, uri);
+  if (!connection.openDocuments.has(uri)) return;
+  connection.process.sendNotification("textDocument/didClose", { textDocument: { uri } });
+  connection.openDocuments.delete(uri);
+  connection.documentOwners.delete(uri);
+  connection.documentSnapshots.delete(uri);
+  connection.documentVersions.delete(uri);
+}
+
+function scheduleJavaDocumentClose(connection, uri, startedAt = Date.now()) {
+  cancelPendingJavaDocumentClose(connection, uri);
+
+  const owners = connection.documentOwners.get(uri);
+  if (owners && owners.size) return;
+
+  const snapshot = connection.documentSnapshots.get(uri);
+  const disk = javaDocumentDiskContent(connection, uri);
+  if (snapshot == null || disk === snapshot || Date.now() - startedAt >= 120000) {
+    closeJavaDocumentNow(connection, uri);
+    return;
+  }
+
+  const timer = setTimeout(() => scheduleJavaDocumentClose(connection, uri, startedAt), 100);
+  connection.pendingDocumentCloseTimers.set(uri, timer);
+}
+
+function releaseJavaWebSocketDocuments(connection, ws) {
+  for (const uri of ws.javaOpenDocuments || []) {
+    const owners = connection.documentOwners.get(uri);
+    if (owners) {
+      owners.delete(ws);
+      if (!owners.size) scheduleJavaDocumentClose(connection, uri);
+    }
+  }
+  ws.javaOpenDocuments?.clear();
+}
+
+function scheduleJavaConnectionIdleStop(connection) {
+  if (connection.clients.size || connection.idleStopTimer) return;
+  connection.idleStopTimer = setTimeout(() => {
+    if (connection.clients.size) return;
+    for (const timer of connection.pendingDocumentCloseTimers.values()) clearTimeout(timer);
+    connection.pendingDocumentCloseTimers.clear();
+    connection.process.stop();
+    connection.state.connections.delete(connection);
+    javaConnections.delete(connection);
+    if (connection.state.sharedConnection === connection) connection.state.sharedConnection = null;
+  }, 120000);
 }
 
 function javaWorkspacePathFromUri(state, uri) {
@@ -1124,7 +1253,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readRequestBody(req);
       const data = JSON.parse(body || "{}");
       const newFolder = normalizeSyncRoot(data.projectFolder || data.folder || "");
-      const state = javaProjectState(newFolder);
+      const state = await waitForJavaProjectState(newFolder);
       if (!state) {
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ ok: false, error: "Invalid project folder" }));
@@ -1523,6 +1652,7 @@ function setupJavaWss() {
   wssJava.on("connection", (ws, state) => {
     const connection = createJavaConnection(state, ws);
     ws.cleanedUp = false;
+    ws.javaOpenDocuments = new Set();
     bootstrapJavaProjectState(state);
     console.log(`[jdtls:${state.projectFolder}] browser connected`);
 
@@ -1556,17 +1686,68 @@ function setupJavaWss() {
 
         if (message.method === "textDocument/didOpen") {
           const textDocument = message.params?.textDocument;
-          connection.openDocuments.add(textDocument?.uri);
-          const projectRelative = javaProjectRelativePath(state, workspacePath).toLowerCase();
-          if (projectRelative.startsWith("algs/")) {
-            const previousRoot = state.activeAlgorithmSourceFolder;
-            addJavaProjectSourceFile(state, workspacePath, textDocument?.text || "");
-            if (previousRoot !== state.activeAlgorithmSourceFolder) {
-              bootstrapJavaProjectState(state);
+          const uri = textDocument?.uri;
+          if (!uri) return;
+
+          cancelPendingJavaDocumentClose(connection, uri);
+          ws.javaOpenDocuments.add(uri);
+          if (!connection.documentOwners.has(uri)) connection.documentOwners.set(uri, new Set());
+          connection.documentOwners.get(uri).add(ws);
+
+          const previousAlgorithmRoot = state.activeAlgorithmSourceFolder;
+          const previousSourceFolders = new Set(state.activeSourceFolders);
+          addJavaProjectSourceFile(state, workspacePath, textDocument?.text || "");
+          if (
+            previousAlgorithmRoot !== state.activeAlgorithmSourceFolder ||
+            previousSourceFolders.size !== state.activeSourceFolders.size
+          ) {
+            bootstrapJavaProjectState(state);
+          }
+
+          const text = String(textDocument?.text ?? "");
+          if (connection.openDocuments.has(uri)) {
+            const previousText = connection.documentSnapshots.get(uri);
+            if (previousText !== text) {
+              const version = (connection.documentVersions.get(uri) || 1) + 1;
+              connection.documentVersions.set(uri, version);
+              connection.documentSnapshots.set(uri, text);
+              connection.process.sendNotification("textDocument/didChange", {
+                textDocument: { uri, version },
+                contentChanges: [{ text }]
+              });
             }
+            return;
+          }
+
+          const version = 1;
+          message.params.textDocument.version = version;
+          connection.openDocuments.add(uri);
+          connection.documentVersions.set(uri, version);
+          connection.documentSnapshots.set(uri, text);
+        } else if (message.method === "textDocument/didChange") {
+          const uri = message.params?.textDocument?.uri;
+          if (uri) {
+            const changes = Array.isArray(message.params?.contentChanges)
+              ? message.params.contentChanges
+              : [];
+            const fullTextChange = [...changes].reverse().find(change => typeof change?.text === "string");
+            if (fullTextChange) connection.documentSnapshots.set(uri, fullTextChange.text);
+
+            const version = (connection.documentVersions.get(uri) || 1) + 1;
+            connection.documentVersions.set(uri, version);
+            message.params.textDocument.version = version;
           }
         } else if (message.method === "textDocument/didClose") {
-          connection.openDocuments.delete(message.params?.textDocument?.uri);
+          const uri = message.params?.textDocument?.uri;
+          if (!uri) return;
+
+          ws.javaOpenDocuments.delete(uri);
+          const owners = connection.documentOwners.get(uri);
+          if (owners) {
+            owners.delete(ws);
+            if (!owners.size) scheduleJavaDocumentClose(connection, uri);
+          }
+          return;
         }
 
         connection.process.handleClientMessage(ws, message);
@@ -1582,6 +1763,15 @@ function setupJavaWss() {
               }
             }
           });
+          flushJavaConnectionFileChanges(connection);
+
+          if (connection.process.isInitialized() && ws.readyState === 1) {
+            ws.send(JSON.stringify({
+              jsonrpc: "2.0",
+              method: "language/status",
+              params: { type: "ServiceReady", message: "" }
+            }));
+          }
         }
       } catch (error) {
         console.error(`[jdtls:${state.projectFolder}] bad WS message:`, error.message);
@@ -1592,19 +1782,9 @@ function setupJavaWss() {
       if (ws.cleanedUp) return;
       ws.cleanedUp = true;
 
-      if (connection.process.isInitialized()) {
-        for (const uri of connection.openDocuments) {
-          connection.process.sendNotification("textDocument/didClose", {
-            textDocument: { uri }
-          });
-        }
-      }
-
-      connection.openDocuments.clear();
+      releaseJavaWebSocketDocuments(connection, ws);
       connection.clients.delete(ws);
-      connection.process.stop();
-      state.connections.delete(connection);
-      javaConnections.delete(connection);
+      scheduleJavaConnectionIdleStop(connection);
     };
 
     ws.on("close", () => {
@@ -1616,7 +1796,10 @@ function setupJavaWss() {
       console.error(`[jdtls:${state.projectFolder}] WS error:`, error.message);
     });
 
-    connection.process.start();
+    if (!connection.started) {
+      connection.started = true;
+      connection.process.start();
+    }
   });
 }
 
