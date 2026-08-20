@@ -2815,6 +2815,106 @@ this._connectLsp();
     this.uri = uriForFile(this.virtualFile);
   }
 
+  _javaPublicTypeName(code) {
+    if (!this._isJava()) return "";
+    const match = String(code ?? "").match(
+      /\bpublic\s+(?:abstract\s+|final\s+|sealed\s+|non-sealed\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b/
+    );
+    return match ? match[1] : "";
+  }
+
+  _javaPathForContent(code) {
+    const typeName = this._javaPublicTypeName(code);
+    if (!typeName) return "";
+
+    const folder = normalizePath(
+      this.projectFolder || this.folder || this.syncRoot || ""
+    ).replace(/\/+$/, "");
+    if (!folder) return "";
+
+    const current = normalizePath(this.virtualFile || "");
+    const prefix = `${folder}/`;
+    const relativePath = current.startsWith(prefix)
+      ? current.slice(prefix.length)
+      : current;
+    const lower = relativePath.toLowerCase();
+
+    if (typeName === "Input" || typeName === "Output") {
+      return `${folder}/proj/src/${typeName}.java`;
+    }
+
+    if (typeName === "Algorithm") {
+      if (lower.startsWith("algs/") && lower.endsWith("/src/algorithm.java")) {
+        return current;
+      }
+      return `${folder}/algs/__smartcode_active__/src/Algorithm.java`;
+    }
+
+    const projectTypes = new Set([
+      "ProjectAbstractAlgorithm",
+      "TestCase",
+      "IndicatorTest_Check",
+      "Tools"
+    ]);
+    if (projectTypes.has(typeName)) {
+      return `${folder}/proj/src/${typeName}.java`;
+    }
+
+    const currentName = baseName(relativePath);
+    if (/^(Main|embedded_\d+)\.java$/i.test(currentName)) {
+      return `${folder}/${typeName}.java`;
+    }
+
+    return "";
+  }
+
+  _retargetJavaDocument(code) {
+    if (!this._isJava()) return false;
+
+    const desired = this._javaPathForContent(code);
+    if (!desired || normalizePath(desired) === normalizePath(this.virtualFile)) return false;
+
+    const oldUri = this.uri;
+    const oldDocument = _embeddedJavaDocs.get(oldUri);
+
+    if (oldDocument) {
+      oldDocument.owners.delete(this.id);
+      if (!oldDocument.context && oldDocument.owners.size === 0) {
+        if (this._lspReady()) {
+          this._lspNotify("textDocument/didClose", {
+            textDocument: { uri: oldUri }
+          });
+        }
+        _embeddedJavaDocs.delete(oldUri);
+      }
+    }
+
+    const folder = normalizePath(
+      this.projectFolder || this.folder || this.syncRoot || ""
+    ).replace(/\/+$/, "");
+    this.savePath = folder && desired.startsWith(folder + "/")
+      ? desired.slice(folder.length + 1)
+      : desired;
+    this._updateVirtualFile();
+    this._version = 1;
+    this._javaDocumentReady = false;
+    this._javaCompletionPrimed = false;
+    this._javaCompletionWarmupUntil = Date.now() + 30000;
+    return true;
+  }
+
+  async _refreshJavaContextForCurrentFile() {
+    if (!this._isJava() || !hasServerSupport() || this._destroyed) return false;
+
+    const folder = normalizePath(
+      this.lspFolder || this.projectFolder || this.folder || this.syncRoot || ""
+    ).replace(/\/+$/, "");
+    if (!folder || !this.virtualFile) return false;
+
+    const context = await setServerJavaContext(folder, this.virtualFile);
+    return context.ok === true;
+  }
+
   //DOM
   _buildDom(container) {
         const wrapper = document.createElement("div");
@@ -3702,14 +3802,6 @@ this._connectLsp();
         if (this._isJava() && lspFolder) {
           const context = await setServerJavaContext(lspFolder, this.virtualFile);
           if (!context.ok || this._destroyed) return;
-          if (context.classpathChanged) {
-            resetJavaLspState();
-            if (typeof reconnectJavaLsp === "function") {
-              reconnectJavaLsp(javaLspWebSocketUrl());
-            } else {
-              initJavaLsp();
-            }
-          }
         }
         await _waitLspInit(this._isJava());
         if (this._destroyed) return;
@@ -3821,17 +3913,26 @@ this._connectLsp();
       updateEditorLanguageClass(mode);
     }
 
+    const nextCode = code ?? "";
+    const javaRetargeted = this._retargetJavaDocument(nextCode);
+
     if (
       this._javaDiskContext &&
-      String(code ?? "") !== ""
+      String(nextCode) !== ""
     ) {
       this._javaDiskContext = false;
     }
 
     this._version++;
-    this.cm.setValue(code ?? "");
+    this.cm.setValue(nextCode);
 
-    if (this._lspReady()) {
+    if (javaRetargeted) {
+      this._refreshJavaContextForCurrentFile()
+        .then(() => {
+          if (!this._destroyed && this._lspReady()) this._openInLsp();
+        })
+        .catch(() => {});
+    } else if (this._lspReady()) {
       this._openInLsp();
     }
 

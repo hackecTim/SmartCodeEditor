@@ -174,7 +174,9 @@ window.smartCodeEditor = (() => {
     }
 
     initEmbeddedEditorMode() {
-      const initEmbeddedEditor = () => {
+      let starting = false;
+
+      const initEmbeddedEditor = async () => {
         const factory = window.createEmbeddedEditor || window.createTargetEditor;
 
         if (typeof factory !== "function") {
@@ -182,62 +184,81 @@ window.smartCodeEditor = (() => {
           return;
         }
 
-        const root = this.root();
-        if (!root) return;
+        if (starting || this.embeddedEditorInstance) return;
+        starting = true;
 
-        root.style.display       = "flex";
-        root.style.flexDirection = "column";
-        root.style.overflow      = "hidden";
-
-        if (!root.style.height) root.style.height = "100%";
-
-        const initialContent =
-          Object.prototype.hasOwnProperty.call(this.options, "content")
-            ? this.options.content
-            : this.options.initialContent;
-
-        this.embeddedEditorInstance = factory(root, {
-          language:        this.options.language || "java",
-          projectFolder:   this.options.projectFolder || this.options.folder || this.options.project || null,
-          lspFolder:       this.options.lspFolder || this.options.projectFolder || this.options.folder || this.options.project || null,
-          folder:          this.options.folder || this.options.projectFolder || this.options.project || null,
-          syncRoot:        this.syncRoot,
-          lsyncEnabled:    this.lsyncEnabled,
-          savePath:        this.options.savePath || null,
-          saveEnabled:     this.options.saveEnabled === true,
-          showDiagnostics: this.showDiagnostics,
-          readOnly:        this.options.readOnly !== false,
-          content:         initialContent
-        });
-
-        const instance = this.embeddedEditorInstance;
-        this.readyPromise = Promise.resolve(
-          typeof instance?.whenReady === "function"
-            ? instance.whenReady()
-            : instance
-        ).then(() => {
-          if (this.embeddedEditorInstance !== instance) return this;
-
-          if (this.pendingContent !== undefined) {
-            instance.setContent(
-              this.pendingContent ?? "",
-              this.pendingLanguage || this.options.language || "java"
-            );
-
-            this.pendingContent  = undefined;
-            this.pendingLanguage = undefined;
+        try {
+          const language = this.options.language || embeddedModeToLanguage(this.options.mode, "java");
+          if (!this.options.savePath && language === "java") {
+            this.options = await resolveEmbeddedSource(this.options);
+            this.syncRoot = Object.prototype.hasOwnProperty.call(this.options, "syncRoot")
+              ? (this.options.syncRoot || "")
+              : (this.options.projectFolder || this.options.folder || "");
+            this.lsyncEnabled = this.options.lsyncEnabled === true;
+            window.smartCodeInitialOptions = this.options;
           }
 
-          this.readyState = true;
-          instance.refresh?.();
+          const root = this.root();
+          if (!root) return;
 
-          setTimeout(() => {
-            if (this.embeddedEditorInstance !== instance) return;
+          root.style.display       = "flex";
+          root.style.flexDirection = "column";
+          root.style.overflow      = "hidden";
+
+          if (!root.style.height) root.style.height = "100%";
+
+          const initialContent =
+            Object.prototype.hasOwnProperty.call(this.options, "content")
+              ? this.options.content
+              : this.options.initialContent;
+
+          this.embeddedEditorInstance = factory(root, {
+            language:        this.options.language || "java",
+            projectFolder:   this.options.projectFolder || this.options.folder || this.options.project || null,
+            lspFolder:       this.options.lspFolder || this.options.projectFolder || this.options.folder || this.options.project || null,
+            folder:          this.options.folder || this.options.projectFolder || this.options.project || null,
+            syncRoot:        this.syncRoot,
+            lsyncEnabled:    this.lsyncEnabled,
+            savePath:        this.options.savePath || null,
+            saveEnabled:     this.options.saveEnabled === true,
+            showDiagnostics: this.showDiagnostics,
+            readOnly:        this.options.readOnly !== false,
+            content:         initialContent
+          });
+
+          const instance = this.embeddedEditorInstance;
+          this.readyPromise = Promise.resolve(
+            typeof instance?.whenReady === "function"
+              ? instance.whenReady()
+              : instance
+          ).then(() => {
+            if (this.embeddedEditorInstance !== instance) return this;
+
+            if (this.pendingContent !== undefined) {
+              instance.setContent(
+                this.pendingContent ?? "",
+                this.pendingLanguage || this.options.language || "java"
+              );
+
+              this.pendingContent  = undefined;
+              this.pendingLanguage = undefined;
+            }
+
+            this.readyState = true;
             instance.refresh?.();
-          }, 100);
 
-          return this;
-        });
+            setTimeout(() => {
+              if (this.embeddedEditorInstance !== instance) return;
+              instance.refresh?.();
+            }, 100);
+
+            return this;
+          });
+        } catch (error) {
+          console.error("[smartCodeEditor] embedded initialization failed:", error);
+        } finally {
+          starting = false;
+        }
       };
 
       if (document.readyState === "loading") {
@@ -636,6 +657,47 @@ window.smartCodeEditor = (() => {
       : "http://localhost:3000";
   }
 
+  function embeddedInitialContent(opts) {
+    if (Object.prototype.hasOwnProperty.call(opts, "content")) return opts.content;
+    if (Object.prototype.hasOwnProperty.call(opts, "initialContent")) return opts.initialContent;
+    return undefined;
+  }
+
+  function javaPublicTypeName(content) {
+    const match = String(content ?? "").match(
+      /\bpublic\s+(?:abstract\s+|final\s+|sealed\s+|non-sealed\s+)?(?:class|interface|enum|record)\s+([A-Za-z_$][\w$]*)\b/
+    );
+    return match ? match[1] : "";
+  }
+
+  function embeddedFallbackSavePath(opts, language) {
+    const explicit = opts.filePath || opts.savePath || opts.relativePath;
+    if (explicit) return explicit;
+
+    const ext = { java: ".java", c: ".c", cpp: ".cpp" }[language] || ".java";
+    if (language !== "java") return (opts.key || "Main") + ext;
+
+    const typeName = javaPublicTypeName(embeddedInitialContent(opts));
+
+    if (typeName === "Input" || typeName === "Output") {
+      return `proj/src/${typeName}.java`;
+    }
+
+    if (typeName === "Algorithm") {
+      const algorithm = String(
+        opts.algorithmName || opts.algorithm || opts.algorithmKey || ""
+      ).trim();
+      if (algorithm) {
+        const folder = algorithm.startsWith("ALG-") ? algorithm : `ALG-${algorithm}`;
+        return `algs/${folder}/src/Algorithm.java`;
+      }
+      return "algs/__smartcode_new__/src/Algorithm.java";
+    }
+
+    if (typeName) return `${typeName}.java`;
+    return (opts.key || "Main") + ext;
+  }
+
   async function resolveEmbeddedSource(opts) {
     if (!opts.projectName || !opts.algorithmName) {
       const language = opts.language || embeddedModeToLanguage(opts.mode, "java");
@@ -643,8 +705,7 @@ window.smartCodeEditor = (() => {
         opts.projectName,
         opts.projectFolder || opts.folder || opts.project
       );
-      const savePath = opts.filePath || opts.savePath || opts.relativePath ||
-        ((opts.key || "Main") + ({ java: ".java", c: ".c", cpp: ".cpp" }[language] || ".java"));
+      const savePath = embeddedFallbackSavePath(opts, language);
 
       return {
         ...opts,
@@ -656,9 +717,7 @@ window.smartCodeEditor = (() => {
           ? opts.syncRoot
           : projectFolder,
         savePath,
-        content: Object.prototype.hasOwnProperty.call(opts, "content")
-          ? (opts.content ?? "")
-          : undefined,
+        content: embeddedInitialContent(opts),
         saveEnabled: opts.saveEnabled === true
       };
     }
@@ -668,14 +727,33 @@ window.smartCodeEditor = (() => {
       algorithm: String(opts.algorithmName)
     });
 
-    const response = await fetch(`${getServerHttpUrl()}/resolve-embedded-file?${query.toString()}`);
-    if (!response.ok) {
-      let message = `Datoteke algoritma '${opts.algorithmName}' ni mogoče najti.`;
-      try {
-        const body = await response.json();
-        if (body?.error) message = body.error;
-      } catch {}
-      throw new Error(message);
+    let response = null;
+    const deadline = Date.now() + 4000;
+    do {
+      response = await fetch(`${getServerHttpUrl()}/resolve-embedded-file?${query.toString()}`);
+      if (response.ok || Date.now() >= deadline) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (true);
+
+    if (!response?.ok) {
+      const language = opts.language || embeddedModeToLanguage(opts.mode, "java");
+      const projectFolder = normalizeEmbeddedProjectFolder(
+        opts.projectName,
+        opts.projectFolder || opts.folder || opts.project
+      );
+      return {
+        ...opts,
+        language,
+        projectFolder,
+        lspFolder: opts.lspFolder || projectFolder,
+        folder: opts.folder || projectFolder,
+        syncRoot: Object.prototype.hasOwnProperty.call(opts, "syncRoot")
+          ? opts.syncRoot
+          : projectFolder,
+        savePath: embeddedFallbackSavePath(opts, language),
+        content: embeddedInitialContent(opts),
+        saveEnabled: opts.saveEnabled === true
+      };
     }
 
     const source = await response.json();
@@ -688,9 +766,7 @@ window.smartCodeEditor = (() => {
       folder: source.projectFolder,
       syncRoot: source.projectFolder,
       savePath: source.relativePath,
-      content: Object.prototype.hasOwnProperty.call(opts, "content")
-        ? (opts.content ?? "")
-        : "",
+      content: embeddedInitialContent(opts) ?? "",
       lsyncEnabled: true,
       saveEnabled: false,
       resolvedSource: source
